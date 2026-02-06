@@ -31,6 +31,8 @@ MAX_LINES = int(os.environ.get("MAX_LINES", "3"))
 # Paper and printer geometry
 PAPER_WIDTH_MM = float(os.environ.get("PAPER_WIDTH_MM", "79.375"))
 PRINTER_DPI = int(os.environ.get("PRINTER_DPI", "203"))
+X_OFFSET_MM = float(os.environ.get("X_OFFSET_MM", "0"))
+Y_OFFSET_MM = float(os.environ.get("Y_OFFSET_MM", "0"))
 # Image processing controls for printer compatibility
 IMAGE_IMPL = os.environ.get("IMAGE_IMPL", "bitImageColumn")
 IMAGE_IMPLS = os.environ.get("IMAGE_IMPLS")
@@ -74,6 +76,8 @@ class WhiteboardPrinter:
     def create_layout(self, message):
         # Compute width from paper size and printer DPI
         width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
+        x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
+        y_offset_px = int(round(Y_OFFSET_MM / 25.4 * PRINTER_DPI))
 
         # MASSIVE font sizes
         font_main_size = 70
@@ -124,26 +128,26 @@ class WhiteboardPrinter:
         canvas = Image.new('RGB', (width, total_height), color=(255, 255, 255))
         draw = ImageDraw.Draw(canvas)
 
-        y = top_pad
+        y = top_pad + y_offset_px
         # 1. Lightning Bolt Symbol (Centered)
         bolt_x = (width - (bolt_bbox[2] - bolt_bbox[0])) // 2
-        draw.text((bolt_x, y), "⚡", font=font_bold, fill=(0, 0, 0))
+        draw.text((bolt_x + x_offset_px, y), "⚡", font=font_bold, fill=(0, 0, 0))
         y += bolt_height + bolt_gap
 
         for line in lines:
             bbox = draw.textbbox((0, 0), line, font=font_bold)
-            draw.text(((width - (bbox[2]-bbox[0]))//2, y), line, font=font_bold, fill=(0, 0, 0))
+            draw.text(((width - (bbox[2]-bbox[0]))//2 + x_offset_px, y), line, font=font_bold, fill=(0, 0, 0))
             y += main_line_height + line_gap
 
         # 3. Divider line
         y += divider_gap
-        draw.line([20, y, width-20, y], fill=(0, 0, 0), width=3)
+        draw.line([20 + x_offset_px, y, width-20 + x_offset_px, y], fill=(0, 0, 0), width=3)
         y += date_gap
 
         # 4. Date Sub-header
         date_str = time.strftime("%b %d, %Y")
         bbox = draw.textbbox((0, 0), date_str, font=font_reg)
-        draw.text(((width - (bbox[2]-bbox[0]))//2, y), date_str, font=font_reg, fill=(0, 0, 0))
+        draw.text(((width - (bbox[2]-bbox[0]))//2 + x_offset_px, y), date_str, font=font_reg, fill=(0, 0, 0))
         y += sub_line_height + bottom_pad
 
         return canvas
@@ -152,25 +156,27 @@ class WhiteboardPrinter:
         # Build a calibration grid to verify centering and scaling
         width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
         height = int(round(width * 1.6))
+        x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
+        y_offset_px = int(round(Y_OFFSET_MM / 25.4 * PRINTER_DPI))
 
         canvas = Image.new('RGB', (width, height), color=(255, 255, 255))
         draw = ImageDraw.Draw(canvas)
 
         # Border
-        draw.rectangle([0, 0, width - 1, height - 1], outline=(0, 0, 0), width=1)
+        draw.rectangle([0 + x_offset_px, 0 + y_offset_px, width - 1 + x_offset_px, height - 1 + y_offset_px], outline=(0, 0, 0), width=1)
 
         # Center lines
-        cx = width // 2
-        cy = height // 2
-        draw.line([cx, 0, cx, height], fill=(0, 0, 0), width=1)
-        draw.line([0, cy, width, cy], fill=(0, 0, 0), width=1)
+        cx = width // 2 + x_offset_px
+        cy = height // 2 + y_offset_px
+        draw.line([cx, 0 + y_offset_px, cx, height + y_offset_px], fill=(0, 0, 0), width=1)
+        draw.line([0 + x_offset_px, cy, width + x_offset_px, cy], fill=(0, 0, 0), width=1)
 
         # Tick marks every 10 mm along width
         mm_to_px = PRINTER_DPI / 25.4
         for mm in range(0, int(PAPER_WIDTH_MM) + 1, 10):
-            x = int(round(mm * mm_to_px))
-            draw.line([x, 0, x, 20], fill=(0, 0, 0), width=1)
-            draw.line([x, height - 20, x, height], fill=(0, 0, 0), width=1)
+            x = int(round(mm * mm_to_px)) + x_offset_px
+            draw.line([x, 0 + y_offset_px, x, 20 + y_offset_px], fill=(0, 0, 0), width=1)
+            draw.line([x, height - 20 + y_offset_px, x, height + y_offset_px], fill=(0, 0, 0), width=1)
 
         # Labels
         label = f"W={PAPER_WIDTH_MM}mm DPI={PRINTER_DPI} px={width}"
@@ -178,8 +184,8 @@ class WhiteboardPrinter:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
         except Exception:
             font = ImageFont.load_default()
-        draw.text((10, 10), "ALIGNMENT TEST", font=font, fill=(0, 0, 0))
-        draw.text((10, 35), label, font=font, fill=(0, 0, 0))
+        draw.text((10 + x_offset_px, 10 + y_offset_px), "ALIGNMENT TEST", font=font, fill=(0, 0, 0))
+        draw.text((10 + x_offset_px, 35 + y_offset_px), label, font=font, fill=(0, 0, 0))
 
         return canvas
 
