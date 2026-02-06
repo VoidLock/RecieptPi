@@ -472,10 +472,10 @@ class WhiteboardPrinter:
         draw = ImageDraw.Draw(canvas)
         
         try:
-            font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 64)
-            font_medium = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
-            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 34)
-            font_tiny = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
+            font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+            font_medium = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 34)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+            font_tiny = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
         except Exception:
             font_large = font_medium = font_small = font_tiny = ImageFont.load_default()
         
@@ -483,17 +483,18 @@ class WhiteboardPrinter:
         title = "CALIBRATION GRID"
         title_bbox = draw.textbbox((0, 0), title, font=font_large)
         title_x = (full_width - (title_bbox[2] - title_bbox[0])) // 2
-        draw.text((title_x, 18), title, font=font_large, fill=(0, 0, 0))
+        draw.text((title_x, 16), title, font=font_large, fill=(0, 0, 0))
         
         # Instructions - larger and more readable
         inst1 = "NOTE: Last visible LETTER on RIGHT edge"
         inst2 = "(Letters only at 10mm marks)"
         inst1_bbox = draw.textbbox((0, 0), inst1, font=font_tiny)
         inst2_bbox = draw.textbbox((0, 0), inst2, font=font_tiny)
-        draw.text(((full_width - (inst1_bbox[2] - inst1_bbox[0])) // 2, 95), inst1, font=font_tiny, fill=(0, 0, 0))
-        draw.text(((full_width - (inst2_bbox[2] - inst2_bbox[0])) // 2, 125), inst2, font=font_tiny, fill=(0, 0, 0))
+        draw.text(((full_width - (inst1_bbox[2] - inst1_bbox[0])) // 2, 80), inst1, font=font_tiny, fill=(0, 0, 0))
+        draw.text(((full_width - (inst2_bbox[2] - inst2_bbox[0])) // 2, 105), inst2, font=font_tiny, fill=(0, 0, 0))
         
-        grid_start_y = 190
+        grid_start_y = 260
+        grid_end_y = height - 160
         
         # Draw horizontal lines every 10mm with row numbers
         for row_mm in range(0, 65, 10):
@@ -501,7 +502,7 @@ class WhiteboardPrinter:
             draw.line([0, y, full_width, y], fill=(150, 150, 150), width=2)
             # Row label on left - larger
             row_label = f"{row_mm}mm"
-            draw.text((10, y - 24), row_label, font=font_small, fill=(0, 0, 0))
+            draw.text((10, y - 20), row_label, font=font_small, fill=(0, 0, 0))
         
         # Draw vertical lines every 5mm; label letters at 10mm marks
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ"  # Extended for wider paper
@@ -512,23 +513,23 @@ class WhiteboardPrinter:
             
             # Thicker line every 10mm
             line_width = 3 if col_mm % 10 == 0 else 1
-            draw.line([x, grid_start_y, x, height], fill=(100, 100, 100), width=line_width)
+            draw.line([x, grid_start_y, x, grid_end_y], fill=(100, 100, 100), width=line_width)
             
             # Column letter at top - much larger
             if col_mm % 10 == 0 and col_idx < len(letters):
                 letter = letters[col_idx]
                 letter_bbox = draw.textbbox((0, 0), letter, font=font_medium)
                 letter_width = letter_bbox[2] - letter_bbox[0]
-                draw.text((x - letter_width // 2, grid_start_y - 72), letter, font=font_medium, fill=(0, 0, 0))
+                draw.text((x - letter_width // 2, grid_start_y - 62), letter, font=font_medium, fill=(0, 0, 0))
                 # mm value below letter - still readable
                 mm_text = f"{col_mm}mm"
-                mm_bbox = draw.textbbox((0, 0), mm_text, font=font_small)
+                mm_bbox = draw.textbbox((0, 0), mm_text, font=font_tiny)
                 mm_width = mm_bbox[2] - mm_bbox[0]
-                draw.text((x - mm_width // 2, grid_start_y - 38), mm_text, font=font_small, fill=(100, 100, 100))
+                draw.text((x - mm_width // 2, grid_start_y - 34), mm_text, font=font_tiny, fill=(100, 100, 100))
         
         # Draw center line (current paper center)
         center_x = full_width // 2
-        draw.line([center_x, grid_start_y, center_x, height], fill=(255, 0, 0), width=4)
+        draw.line([center_x, grid_start_y, center_x, grid_end_y], fill=(255, 0, 0), width=4)
         center_label = "CENTER"
         center_bbox = draw.textbbox((0, 0), center_label, font=font_small)
         center_width = center_bbox[2] - center_bbox[0]
@@ -540,11 +541,11 @@ class WhiteboardPrinter:
         right_margin = full_width - safe_margin_px
         
         # Left margin line
-        draw.line([left_margin, grid_start_y, left_margin, height], fill=(0, 150, 0), width=2)
+        draw.line([left_margin, grid_start_y, left_margin, grid_end_y], fill=(0, 150, 0), width=2)
         draw.text((left_margin + 6, grid_start_y + 32), "LEFT", font=font_small, fill=(0, 150, 0))
         
         # Right margin line
-        draw.line([right_margin, grid_start_y, right_margin, height], fill=(0, 150, 0), width=2)
+        draw.line([right_margin, grid_start_y, right_margin, grid_end_y], fill=(0, 150, 0), width=2)
         draw.text((right_margin - 70, grid_start_y + 32), "RIGHT", font=font_small, fill=(0, 150, 0))
         
         # Config info at bottom
