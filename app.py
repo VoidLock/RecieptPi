@@ -196,18 +196,19 @@ class WhiteboardPrinter:
             return self.create_layout(json.dumps(payload))
     
     def _render_monday_task(self, payload):
-        """Compact monday.com task card layout."""
+        """Kanban card style layout (monochrome) with borders and priority indicator."""
         width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
         x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
         y_offset_px = int(round(Y_OFFSET_MM / 25.4 * PRINTER_DPI))
         
         try:
-            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
-            font_meta = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+            font_meta = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
         except Exception:
-            font_title = font_meta = ImageFont.load_default()
+            font_title = font_meta = font_small = ImageFont.load_default()
         
-        # Extract fields (with safe defaults)
+        # Extract fields
         task_name = payload.get("task", "Task").strip()[:50]
         priority = payload.get("priority", "medium").lower()
         status = payload.get("status", "todo").lower()
@@ -216,54 +217,88 @@ class WhiteboardPrinter:
         ref_id = payload.get("id", payload.get("ref_id", ""))
         qr_data = payload.get("qr_url") or payload.get("url")
         
-        # Build compact layout
-        height = 350
-        canvas = Image.new('RGB', (width, height), color=(255, 255, 255))
+        # Priority indicator width (monochrome: thicker = higher priority)
+        priority_widths = {
+            "critical": 8,
+            "high": 6,
+            "medium": 4,
+            "low": 2,
+        }
+        priority_width = priority_widths.get(priority, 3)
+        
+        # Calculate dimensions
+        qr_size = 80 if qr_data else 0
+        card_height = 220 + qr_size
+        card_width = width - 40
+        padding = 15
+        card_x = 20 + x_offset_px
+        card_y = 10 + y_offset_px
+        
+        canvas = Image.new('RGB', (width, card_height), color=(255, 255, 255))
         draw = ImageDraw.Draw(canvas)
         
-        y = 15 + y_offset_px
+        # Card border/frame (black)
+        draw.rectangle(
+            [card_x, card_y, card_x + card_width, card_y + card_height - 15],
+            outline=(0, 0, 0),
+            width=2
+        )
         
-        # Task title (wrapped)
-        lines = textwrap.wrap(task_name, width=15)
+        # Priority indicator bar (left side, varying thickness based on priority)
+        draw.rectangle(
+            [card_x, card_y, card_x + priority_width, card_y + card_height - 15],
+            fill=(0, 0, 0),
+            outline=(0, 0, 0)
+        )
+        
+        # Content area
+        y = card_y + padding
+        content_x = card_x + padding + 5
+        
+        # Task title (wrapped, bold)
+        lines = textwrap.wrap(task_name, width=18)
         for line in lines[:2]:
-            bbox = draw.textbbox((0, 0), line, font=font_title)
-            draw.text(((width - (bbox[2]-bbox[0]))//2 + x_offset_px, y), line, font=font_title, fill=(0, 0, 0))
-            y += 45
+            draw.text((content_x, y), line, font=font_title, fill=(0, 0, 0))
+            y += 32
         
-        # Meta line: [PRIORITY] | STATUS | ASSIGN
-        priority_icon = ICON_PRIORITY.get(priority, "[!]")
+        y += 8
+        
+        # Status badge / icon
         status_icon = ICON_STATUS.get(status, "[?]")
-        meta_str = f"{priority_icon} {status_icon}"
+        priority_icon = ICON_PRIORITY.get(priority, "[!]")
+        draw.text((content_x, y), f"{status_icon} {priority_icon}", font=font_meta, fill=(0, 0, 0))
+        y += 24
+        
+        # Metadata row: assignee and due date
+        meta_parts = []
         if assignee:
-            meta_str += f" | {assignee}"
+            meta_parts.append(f"@{assignee}")
         if due_date:
-            meta_str += f" | {due_date}"
+            meta_parts.append(f"{due_date}")
         
-        bbox = draw.textbbox((0, 0), meta_str, font=font_meta)
-        draw.text(((width - (bbox[2]-bbox[0]))//2 + x_offset_px, y), meta_str, font=font_meta, fill=(0, 0, 0))
-        y += 35
+        if meta_parts:
+            meta_text = "  |  ".join(meta_parts)
+            draw.text((content_x, y), meta_text, font=font_small, fill=(0, 0, 0))
+            y += 20
         
-        # Divider
-        draw.line([20 + x_offset_px, y, width-20 + x_offset_px, y], fill=(0, 0, 0), width=2)
-        y += 15
+        # Reference ID
+        if ref_id:
+            draw.text((content_x, y), f"#{ref_id}", font=font_small, fill=(0, 0, 0))
+            y += 18
         
-        # QR code (small, bottom right) or ref ID
+        # QR code (bottom right corner of card)
         if qr_data:
             try:
-                qr = qrcode.QRCode(version=1, box_size=2, border=1)
+                qr = qrcode.QRCode(version=1, box_size=3, border=1)
                 qr.add_data(qr_data)
                 qr.make()
                 qr_img = qr.make_image(fill_color="black", back_color="white")
-                qr_resized = qr_img.resize((60, 60), Image.NEAREST)
-                qr_x = width - 70
-                canvas.paste(qr_resized, (qr_x + x_offset_px, y))
+                qr_resized = qr_img.resize((70, 70), Image.NEAREST)
+                qr_x = card_x + card_width - 75
+                qr_y = card_y + card_height - 85
+                canvas.paste(qr_resized, (qr_x, qr_y))
             except Exception as e:
                 logging.warning("QR generation failed: %s", e)
-        
-        # Ref ID (left side)
-        if ref_id:
-            bbox = draw.textbbox((0, 0), str(ref_id), font=font_meta)
-            draw.text((20 + x_offset_px, y + 15), str(ref_id), font=font_meta, fill=(0, 0, 0))
         
         return canvas
 
