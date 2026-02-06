@@ -622,6 +622,13 @@ class WhiteboardPrinter:
         # Preview mode - show image instead of printing
         if self.preview_mode:
             scale = max(1, config.IMAGE_SCALE)
+            
+            # Ensure scaled image doesn't exceed paper width
+            max_scaled_width = config.PAPER_WIDTH_PX
+            if img.width * scale > max_scaled_width:
+                scale = max(1, max_scaled_width // img.width)
+                logging.debug(f"Capping scale to {scale} to fit paper width {config.PAPER_WIDTH_PX}px")
+            
             scaled_width = img.width * scale
             scaled_height = img.height * scale
             img_scaled = img.resize((scaled_width, scaled_height), Image.NEAREST)
@@ -650,6 +657,13 @@ class WhiteboardPrinter:
                     return
                 self.p.hw("INIT")
                 scale = max(1, config.IMAGE_SCALE)
+                
+                # Ensure scaled image doesn't exceed paper width
+                max_scaled_width = config.PAPER_WIDTH_PX
+                if img.width * scale > max_scaled_width:
+                    scale = max(1, max_scaled_width // img.width)
+                    logging.debug(f"Capping scale to {scale} to fit paper width {config.PAPER_WIDTH_PX}px")
+                
                 scaled_width = img.width * scale
                 scaled_height = img.height * scale
                 img_scaled = img.resize((scaled_width, scaled_height), Image.NEAREST)
