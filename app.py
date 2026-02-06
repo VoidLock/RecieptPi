@@ -170,16 +170,16 @@ def detect_priority(message, payload=None):
 def get_priority_symbol(priority_level):
     """Get the alert symbol(s) and count for priority level.
     
-    Returns: (symbol_str) - already formatted
+    Returns: (symbol, count) tuple - symbol is emoji, count is repetitions
     """
     symbols = {
-        "max": "***",      # 3 asterisks for max
-        "high": "**",      # 2 asterisks for high
-        "default": "*",    # 1 asterisk for default
-        "low": "-",        # Hyphen for low
-        "min": "~",        # Tilde for minimal
+        "max": ("⚡", 3),      # 3 lightning bolts for max
+        "high": ("⚡", 2),     # 2 lightning bolts for high
+        "default": ("⚡", 1),  # 1 lightning bolt for default
+        "low": ("↓", 1),       # Down arrow for low
+        "min": ("•", 1),       # Bullet for minimal
     }
-    return symbols.get(priority_level, "*")
+    return symbols.get(priority_level, ("⚡", 1))
 
 
 def draw_priority_banner(draw, x, y, width, height, priority, font, text_color=(0, 0, 0), bg_color=(200, 200, 200)):
@@ -350,8 +350,9 @@ class WhiteboardPrinter:
         subtext_gap = 10
         bottom_pad = 20
         
-        # Get priority-based alert symbol (already formatted string)
-        alert_symbol = get_priority_symbol(priority)
+        # Get priority-based alert symbol and count
+        symbol, count = get_priority_symbol(priority)
+        alert_symbol = symbol * count  # Repeat symbol based on priority
 
         lines_height = (len(lines) * main_line_height) + (max(0, len(lines) - 1) * line_gap)
         bolt_bbox = font_bold.getbbox(alert_symbol)
