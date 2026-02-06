@@ -119,6 +119,77 @@ def strip_emojis(text):
     text = emoji_pattern.sub('', text)
     return text
 
+def draw_priority_banner(draw, x, y, width, height, priority, font, text_color=(0, 0, 0), bg_color=(200, 200, 200)):
+    """Draw a priority banner with visual styling based on priority level.
+    
+    Args:
+        draw: PIL ImageDraw object
+        x, y: Top-left coordinates
+        width, height: Banner dimensions
+        priority: One of "critical", "high", "medium", "low"
+        font: PIL Font for text
+        text_color: RGB tuple for text
+        bg_color: RGB tuple for background
+    
+    Returns: Text to display in banner
+    """
+    # Define visual styles per priority
+    styles = {
+        "critical": {
+            "text": "⚠ CRITICAL ⚠",
+            "fill": (255, 100, 100),  # Red
+            "pattern": "heavy",  # Dense shading
+        },
+        "high": {
+            "text": "● HIGH ●",
+            "fill": (255, 180, 100),  # Orange
+            "pattern": "medium",
+        },
+        "medium": {
+            "text": "○ MEDIUM ○",
+            "fill": (255, 255, 100),  # Yellow
+            "pattern": "light",
+        },
+        "low": {
+            "text": "- LOW -",
+            "fill": (200, 255, 200),  # Light green
+            "pattern": "minimal",
+        },
+    }
+    
+    style = styles.get(priority.lower(), styles["medium"])
+    fill = style["fill"]
+    banner_text = style["text"]
+    pattern = style["pattern"]
+    
+    # Draw background rectangle with border
+    border_width = 2
+    draw.rectangle([x, y, x + width - 1, y + height - 1], fill=fill, outline=(0, 0, 0), width=border_width)
+    
+    # Add pattern/shading based on priority (thicker line = higher priority)
+    if pattern == "heavy":
+        # Dense lines for critical
+        for line_y in range(y + 5, y + height - 5, 2):
+            draw.line([x + 5, line_y, x + width - 5, line_y], fill=(100, 0, 0), width=1)
+    elif pattern == "medium":
+        # Medium spacing for high
+        for line_y in range(y + 5, y + height - 5, 3):
+            draw.line([x + 5, line_y, x + width - 5, line_y], fill=(150, 80, 0), width=1)
+    elif pattern == "light":
+        # Light spacing for medium
+        for line_y in range(y + 5, y + height - 5, 5):
+            draw.line([x + 5, line_y, x + width - 5, line_y], fill=(150, 150, 0), width=1)
+    
+    # Draw text centered in banner
+    text_bbox = draw.textbbox((0, 0), banner_text, font=font)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+    text_x = x + (width - text_width) // 2
+    text_y = y + (height - text_height) // 2
+    draw.text((text_x, text_y), banner_text, font=font, fill=(0, 0, 0))
+    
+    return banner_text
+
 # Image processing controls for printer compatibility
 IMAGE_IMPL = os.environ.get("IMAGE_IMPL", "bitImageColumn")
 IMAGE_IMPLS = os.environ.get("IMAGE_IMPLS")
@@ -168,7 +239,7 @@ class WhiteboardPrinter:
             logging.exception("Failed to connect to USB printer")
             self.p = None
 
-    def create_layout(self, message):
+    def create_layout(self, message, subtext=None):
         # Compute width from paper size and printer DPI, with safe margins
         full_width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
         safe_margin_px = int(round(SAFE_MARGIN_MM / 25.4 * PRINTER_DPI))
@@ -180,13 +251,15 @@ class WhiteboardPrinter:
         # MASSIVE font sizes
         font_main_size = 70
         font_sub_size = 35
+        font_subtext_size = 24
 
         try:
             font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_main_size)
             font_reg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_sub_size)
+            font_subtext = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_subtext_size)
         except Exception:
             logging.warning("Could not load TTF fonts; falling back to default font")
-            font_bold = font_reg = ImageFont.load_default()
+            font_bold = font_reg = font_subtext = ImageFont.load_default()
 
         # 2. Main Message (Heavy Wrap for Size)
         # enforce message caps to avoid unbounded image sizes
@@ -203,27 +276,34 @@ class WhiteboardPrinter:
         main_line_height = sample_main_bbox[3] - sample_main_bbox[1]
         sample_sub_bbox = font_reg.getbbox("Ag")
         sub_line_height = sample_sub_bbox[3] - sample_sub_bbox[1]
+        sample_subtext_bbox = font_subtext.getbbox("Ag")
+        subtext_line_height = sample_subtext_bbox[3] - sample_subtext_bbox[1]
 
         top_pad = 20
         bolt_gap = 15
         line_gap = 10
         divider_gap = 15
         date_gap = 25
+        subtext_gap = 10
         bottom_pad = 20
         
-        # Apply emoji filtering to alert symbol
-        alert_symbol = strip_emojis("🍆")
-
         # Apply emoji filtering to alert symbol
         alert_symbol = strip_emojis("🍆")
 
         lines_height = (len(lines) * main_line_height) + (max(0, len(lines) - 1) * line_gap)
         bolt_bbox = font_bold.getbbox(alert_symbol)
         bolt_height = bolt_bbox[3] - bolt_bbox[1]
+        
+        # Calculate subtext height if provided
+        subtext_height = 0
+        if subtext:
+            subtext_height = subtext_line_height + subtext_gap
+        
         total_height = (
             top_pad +
             bolt_height + bolt_gap +
             lines_height +
+            subtext_height +
             divider_gap + 3 + date_gap +
             sub_line_height + 5 +  # date
             sub_line_height +  # time
@@ -244,12 +324,18 @@ class WhiteboardPrinter:
             draw.text(((width - (bbox[2]-bbox[0]))//2 + left_margin, y), line, font=font_bold, fill=(0, 0, 0))
             y += main_line_height + line_gap
 
-        # 3. Divider line
+        # 3. Optional subtext (smaller, gray)
+        if subtext:
+            subtext_bbox = draw.textbbox((0, 0), subtext, font=font_subtext)
+            draw.text(((width - (subtext_bbox[2]-subtext_bbox[0]))//2 + left_margin, y), subtext, font=font_subtext, fill=(80, 80, 80))
+            y += subtext_line_height + subtext_gap
+
+        # 4. Divider line
         y += divider_gap
         draw.line([left_margin + 20, y, left_margin + width - 20, y], fill=(0, 0, 0), width=3)
         y += date_gap
 
-        # 4. Date Sub-header
+        # 5. Date Sub-header
         date_str = time.strftime("%b %d, %Y")
         time_str = time.strftime("%H:%M:%S")
         bbox = draw.textbbox((0, 0), date_str, font=font_reg)
@@ -267,6 +353,12 @@ class WhiteboardPrinter:
         
         if msg_type == "monday_task":
             return self._render_monday_task(payload)
+        elif msg_type == "text_with_subtext":
+            message = payload.get("message", "Message")
+            subtext = payload.get("subtext")
+            return self.create_layout(strip_emojis(message), subtext=subtext)
+        elif msg_type == "priority_alert":
+            return self._render_priority_alert(payload)
         else:
             # Generic fallback
             return self.create_layout(json.dumps(payload))
@@ -380,6 +472,52 @@ class WhiteboardPrinter:
         
         return canvas
 
+    def _render_priority_alert(self, payload):
+        """Render a priority-based alert with visual banner and optional subtext."""
+        full_width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
+        safe_margin_px = int(round(SAFE_MARGIN_MM / 25.4 * PRINTER_DPI))
+        x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
+        y_offset_px = int(round(Y_OFFSET_MM / 25.4 * PRINTER_DPI))
+        left_margin = safe_margin_px + x_offset_px
+        
+        try:
+            font_banner = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+            font_subtext = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+        except Exception:
+            font_banner = font_subtext = ImageFont.load_default()
+        
+        priority = payload.get("priority", "medium").lower()
+        message = payload.get("message", "Alert")
+        subtext = payload.get("subtext", "")
+        
+        width = full_width - (2 * safe_margin_px)
+        banner_height = 80
+        padding = 15
+        
+        # Calculate total height
+        total_height = banner_height + padding + padding
+        if subtext:
+            subtext_bbox = ImageFont.load_default().getbbox("Ag")
+            subtext_height = (subtext_bbox[3] - subtext_bbox[1]) + padding
+            total_height += subtext_height
+        
+        canvas = Image.new('RGB', (full_width, total_height), color=(255, 255, 255))
+        draw = ImageDraw.Draw(canvas)
+        
+        # Draw priority banner
+        banner_x = left_margin
+        banner_y = padding + y_offset_px
+        draw_priority_banner(draw, banner_x, banner_y, width, banner_height, priority, font_banner)
+        
+        # Draw subtext if provided
+        if subtext:
+            subtext_y = banner_y + banner_height + padding
+            subtext_bbox = draw.textbbox((0, 0), subtext, font=font_subtext)
+            subtext_x = left_margin + (width - (subtext_bbox[2] - subtext_bbox[0])) // 2
+            draw.text((subtext_x, subtext_y), strip_emojis(subtext), font=font_subtext, fill=(80, 80, 80))
+        
+        return canvas
+
     def create_alignment_test(self):
         # Build a simple alignment test using the same layout as regular messages
         width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
@@ -418,7 +556,7 @@ class WhiteboardPrinter:
 
         return canvas
 
-    def print_msg(self, message):
+    def print_msg(self, message, subtext=None):
         if self.is_paused:
             logging.warning("Printer paused due to high memory — dropping message")
             return
@@ -434,11 +572,11 @@ class WhiteboardPrinter:
                     payload["task"] = strip_emojis(payload["task"])
                 img = self.render_structured(payload)
             else:
-                # Fallback to plain text layout
-                img = self.create_layout(strip_emojis(message))
+                # Fallback to plain text layout with optional subtext
+                img = self.create_layout(strip_emojis(message), subtext=subtext)
         except (json.JSONDecodeError, ValueError):
-            # Plain text message - strip emojis
-            img = self.create_layout(strip_emojis(message))
+            # Plain text message - strip emojis, with optional subtext
+            img = self.create_layout(strip_emojis(message), subtext=subtext)
         
         # Preview mode - show image instead of printing
         if self.preview_mode:
