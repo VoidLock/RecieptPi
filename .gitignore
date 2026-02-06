@@ -21,3 +21,4 @@ dry_run_output.png
 .pytest_cache/
 .coverage
 .mypy_cache/
+TESTING.md
