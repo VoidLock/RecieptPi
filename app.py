@@ -129,10 +129,13 @@ STOP_EVENT = threading.Event()
 MONITOR = None
 
 class WhiteboardPrinter:
-    def __init__(self):
+    def __init__(self, preview_mode=False):
         self.p = None
         self._paused = False
-        self.connect()
+        self.preview_mode = preview_mode
+        self.preview_count = 0
+        if not preview_mode:
+            self.connect()
 
     def set_paused(self, paused: bool):
         self._paused = bool(paused)
@@ -142,6 +145,10 @@ class WhiteboardPrinter:
         return self._paused
 
     def connect(self):
+        if self.preview_mode:
+            print("📸 Preview mode - no printer connection needed")
+            return
+        
         try:
             if PRINTER_PROFILE:
                 self.p = Usb(VENDOR_ID, PRODUCT_ID, 0, profile=PRINTER_PROFILE)
@@ -433,6 +440,26 @@ class WhiteboardPrinter:
             # Plain text message - strip emojis
             img = self.create_layout(strip_emojis(message))
         
+        # Preview mode - show image instead of printing
+        if self.preview_mode:
+            scale = max(1, IMAGE_SCALE)
+            scaled_width = img.width * scale
+            scaled_height = img.height * scale
+            img_scaled = img.resize((scaled_width, scaled_height), Image.NEAREST)
+            img_mono = img_scaled.convert("L")
+            img_mono = ImageOps.autocontrast(img_mono)
+            img_mono = ImageEnhance.Contrast(img_mono).enhance(IMAGE_CONTRAST)
+            img_final = img_mono.convert("1")
+            
+            self.preview_count += 1
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"\n[{timestamp}] Preview #{self.preview_count}: {message[:60]}{'...' if len(message) > 60 else ''}")
+            print(f"   Resolution: {img_final.width}x{img_final.height}px")
+            print(f"   Paper: {PAPER_WIDTH_MM}mm ({PAPER_WIDTH_PX}px @ {PRINTER_DPI} DPI)")
+            print(f"   Printable: {PAPER_WIDTH_MM - 2*SAFE_MARGIN_MM}mm ({MAX_PRINTABLE_WIDTH_PX}px)")
+            img_final.show()
+            return
+        
         # Retry logic for USB operations (handles transient device errors)
         max_retries = 3
         retry_delay = 1.0
@@ -514,13 +541,21 @@ class WhiteboardPrinter:
                 pass
         gc.collect()
 
-def listen(ntfy_url):
+def listen(ntfy_url, preview_mode=False):
     global MONITOR
-    wp = WhiteboardPrinter()
+    wp = WhiteboardPrinter(preview_mode=preview_mode)
+    
+    mode_str = "preview mode" if preview_mode else "printer mode"
+    print(f"👀 Listening to {ntfy_url} ({mode_str})")
+    if preview_mode:
+        print(f"📸 Previews will open automatically for each message")
+    print(f"   Press Ctrl+C to stop\n")
+    
     logging.info("Listening to %s", ntfy_url)
-    # Start memory monitor
-    MONITOR = MemoryMonitor(wp)
-    MONITOR.start()
+    # Start memory monitor (skip in preview mode)
+    if not preview_mode:
+        MONITOR = MemoryMonitor(wp)
+        MONITOR.start()
     while not STOP_EVENT.is_set():
         try:
             # use context manager to ensure response is closed
@@ -628,7 +663,31 @@ def main():
     parser.add_argument("--host", default=DEFAULT_NTFY_HOST, help="ntfy host (including scheme)")
     parser.add_argument("--topic", default=DEFAULT_NTFY_TOPIC, help="ntfy topic name")
     parser.add_argument("--test-align", action="store_true", help="print alignment test and exit")
+    parser.add_argument("--preview", "-p", action="store_true", help="preview mode - show images instead of printing")
+    parser.add_argument("--example", "-e", choices=["text", "kanban"], help="show example message")
     args = parser.parse_args()
+    
+    # Example mode
+    if args.example:
+        if args.example == "text":
+            message = "Lunch Time! 🍕🍔"
+            print(f"Example plain text: {message}")
+        elif args.example == "kanban":
+            message = json.dumps({
+                "type": "monday_task",
+                "task": "Design Homepage",
+                "priority": "high",
+                "status": "in_progress",
+                "assignee": "JD",
+                "due_date": "2026-02-15",
+                "id": "M123",
+                "qr_url": "https://monday.com/boards/123"
+            })
+            print(f"Example kanban card:\n{message}")
+        
+        wp = WhiteboardPrinter(preview_mode=True)
+        wp.print_msg(message)
+        sys.exit(0)
 
     if args.test_align:
         wp = WhiteboardPrinter()
@@ -668,7 +727,7 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    listen(ntfy_url)
+    listen(ntfy_url, preview_mode=args.preview)
 
 
 if __name__ == "__main__":
