@@ -34,6 +34,7 @@ PAPER_WIDTH_MM = float(os.environ.get("PAPER_WIDTH_MM", "79.375"))
 PRINTER_DPI = int(os.environ.get("PRINTER_DPI", "203"))
 X_OFFSET_MM = float(os.environ.get("X_OFFSET_MM", "0"))
 Y_OFFSET_MM = float(os.environ.get("Y_OFFSET_MM", "0"))
+SAFE_MARGIN_MM = 4.0  # Safe margin on left/right to prevent cutoff (mm)
 
 # Icon mappings (ASCII-friendly for thermal printer)
 ICON_PRIORITY = {
@@ -102,10 +103,13 @@ class WhiteboardPrinter:
             self.p = None
 
     def create_layout(self, message):
-        # Compute width from paper size and printer DPI
-        width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
+        # Compute width from paper size and printer DPI, with safe margins
+        full_width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
+        safe_margin_px = int(round(SAFE_MARGIN_MM / 25.4 * PRINTER_DPI))
+        width = full_width - (2 * safe_margin_px)  # Subtract margins from usable width
         x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
         y_offset_px = int(round(Y_OFFSET_MM / 25.4 * PRINTER_DPI))
+        left_margin = safe_margin_px + x_offset_px  # Left edge accounting for offset
 
         # MASSIVE font sizes
         font_main_size = 70
@@ -133,7 +137,7 @@ class WhiteboardPrinter:
         main_line_height = sample_main_bbox[3] - sample_main_bbox[1]
         sample_sub_bbox = font_reg.getbbox("Ag")
         sub_line_height = sample_sub_bbox[3] - sample_sub_bbox[1]
-        bolt_bbox = font_bold.getbbox("⚡")
+        bolt_bbox = font_bold.getbbox("[*]")
         bolt_height = bolt_bbox[3] - bolt_bbox[1]
 
         top_pad = 20
@@ -154,33 +158,33 @@ class WhiteboardPrinter:
             bottom_pad
         )
 
-        canvas = Image.new('RGB', (width, total_height), color=(255, 255, 255))
+        canvas = Image.new('RGB', (full_width, total_height), color=(255, 255, 255))
         draw = ImageDraw.Draw(canvas)
 
         y = top_pad + y_offset_px
         # 1. Lightning Bolt Symbol (Centered)
         bolt_x = (width - (bolt_bbox[2] - bolt_bbox[0])) // 2
-        draw.text((bolt_x + x_offset_px, y), "⚡", font=font_bold, fill=(0, 0, 0))
+        draw.text((bolt_x + left_margin, y), "[*]", font=font_bold, fill=(0, 0, 0))
         y += bolt_height + bolt_gap
 
         for line in lines:
             bbox = draw.textbbox((0, 0), line, font=font_bold)
-            draw.text(((width - (bbox[2]-bbox[0]))//2 + x_offset_px, y), line, font=font_bold, fill=(0, 0, 0))
+            draw.text(((width - (bbox[2]-bbox[0]))//2 + left_margin, y), line, font=font_bold, fill=(0, 0, 0))
             y += main_line_height + line_gap
 
         # 3. Divider line
         y += divider_gap
-        draw.line([20 + x_offset_px, y, width-20 + x_offset_px, y], fill=(0, 0, 0), width=3)
+        draw.line([left_margin + 20, y, left_margin + width - 20, y], fill=(0, 0, 0), width=3)
         y += date_gap
 
         # 4. Date Sub-header
         date_str = time.strftime("%b %d, %Y")
         time_str = time.strftime("%H:%M:%S")
         bbox = draw.textbbox((0, 0), date_str, font=font_reg)
-        draw.text(((width - (bbox[2]-bbox[0]))//2 + x_offset_px, y), date_str, font=font_reg, fill=(0, 0, 0))
+        draw.text(((width - (bbox[2]-bbox[0]))//2 + left_margin, y), date_str, font=font_reg, fill=(0, 0, 0))
         y += sub_line_height + 5
         bbox_time = draw.textbbox((0, 0), time_str, font=font_reg)
-        draw.text(((width - (bbox_time[2]-bbox_time[0]))//2 + x_offset_px, y), time_str, font=font_reg, fill=(0, 0, 0))
+        draw.text(((width - (bbox_time[2]-bbox_time[0]))//2 + left_margin, y), time_str, font=font_reg, fill=(0, 0, 0))
         y += sub_line_height + bottom_pad
 
         return canvas
@@ -197,9 +201,11 @@ class WhiteboardPrinter:
     
     def _render_monday_task(self, payload):
         """Kanban card style layout (monochrome) with borders and priority indicator."""
-        width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
+        full_width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
+        safe_margin_px = int(round(SAFE_MARGIN_MM / 25.4 * PRINTER_DPI))
         x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
         y_offset_px = int(round(Y_OFFSET_MM / 25.4 * PRINTER_DPI))
+        left_margin = safe_margin_px + x_offset_px
         
         try:
             font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
@@ -226,15 +232,15 @@ class WhiteboardPrinter:
         }
         priority_width = priority_widths.get(priority, 3)
         
-        # Calculate dimensions
+        # Calculate dimensions with safe margins
         qr_size = 80 if qr_data else 0
         card_height = 220 + qr_size
-        card_width = width - 40
+        card_width = full_width - (2 * safe_margin_px)
         padding = 15
-        card_x = 20 + x_offset_px
+        card_x = left_margin
         card_y = 10 + y_offset_px
         
-        canvas = Image.new('RGB', (width, card_height), color=(255, 255, 255))
+        canvas = Image.new('RGB', (full_width, card_height), color=(255, 255, 255))
         draw = ImageDraw.Draw(canvas)
         
         # Card border/frame (black)
@@ -253,7 +259,7 @@ class WhiteboardPrinter:
         
         # Content area
         y = card_y + padding
-        content_x = card_x + padding + 5
+        content_x = card_x + padding + 5 + 5
         
         # Task title (wrapped, bold)
         lines = textwrap.wrap(task_name, width=18)
