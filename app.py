@@ -120,50 +120,52 @@ def strip_emojis(text):
     return text
 
 def detect_priority(message, payload=None):
-    """Detect priority level from message or payload.
+    """Detect priority level from ntfy message payload.
+    
+    Supports:
+    - ntfy numeric priority (1-5 scale)
+    - Explicit priority field in JSON payload
+    - Priority header values (min, low, default, high, max, urgent)
     
     Returns: ("max", "high", "default", "low", "min")
-    - MAX: *** (critical/urgent keywords)
-    - High: ** (high priority keywords)
-    - Default: * (no keywords or unknown)
-    - Low: ↓ (low priority keywords)
-    - MIN: • (minimal/info only keywords)
     """
-    # Check structured payload first
-    if payload and isinstance(payload, dict):
-        priority = payload.get("priority", "").lower()
-        if priority in ["critical", "max", "emergency"]:
+    if not payload or not isinstance(payload, dict):
+        return "default"
+    
+    # Check for numeric priority (ntfy uses 1-5 scale: 5=max, 4=high, 3=default, 2=low, 1=min)
+    priority_value = payload.get("priority")
+    if priority_value is not None:
+        try:
+            p = int(priority_value)
+            if p >= 5:
+                return "max"
+            elif p >= 4:
+                return "high"
+            elif p >= 3:
+                return "default"
+            elif p >= 2:
+                return "low"
+            else:
+                return "min"
+        except (ValueError, TypeError):
+            pass
+    
+    # Check for string priority values (e.g., from headers or explicit field)
+    priority_str = payload.get("priority_str", payload.get("priority_level", "")).lower()
+    if priority_str:
+        if priority_str in ["5", "urgent", "critical", "max", "emergency"]:
             return "max"
-        elif priority in ["high", "urgent"]:
+        elif priority_str in ["4", "high"]:
             return "high"
-        elif priority in ["medium", "default", "normal"]:
+        elif priority_str in ["3", "normal", "default", "medium"]:
             return "default"
-        elif priority in ["low"]:
+        elif priority_str in ["2", "low"]:
             return "low"
-        elif priority in ["min", "minimal", "info"]:
+        elif priority_str in ["1", "min", "minimal"]:
             return "min"
     
-    # Check message text for keywords (order matters - check specific before general)
-    msg_lower = message.lower()
-    
-    # Max priority keywords
-    if any(kw in msg_lower for kw in ["critical", "emergency", "urgent", "alert", "alarm"]):
-        return "max"
-    
-    # High priority keywords
-    if any(kw in msg_lower for kw in ["important", "action required", "attention"]):
-        return "high"
-    
-    # Min priority keywords (check before low since "info" overlaps)
-    if any(kw in msg_lower for kw in ["minimal", "optional", "nice to have"]):
-        return "min"
-    
-    # Low priority keywords
-    if any(kw in msg_lower for kw in ["low priority", "fyi", "low importance"]):
-        return "low"
-    
-    # Default if no keywords found
     return "default"
+
 
 def get_priority_symbol(priority_level):
     """Get the alert symbol(s) and count for priority level.
@@ -618,7 +620,7 @@ class WhiteboardPrinter:
 
         return canvas
 
-    def print_msg(self, message, subtext=None):
+    def print_msg(self, message, subtext=None, payload=None):
         if self.is_paused:
             logging.warning("Printer paused due to high memory — dropping message")
             return
@@ -627,21 +629,21 @@ class WhiteboardPrinter:
         
         # Detect if message is JSON (structured payload)
         try:
-            payload = json.loads(message)
-            if isinstance(payload, dict) and "type" in payload:
+            msg_payload = json.loads(message)
+            if isinstance(msg_payload, dict) and "type" in msg_payload:
                 # Structured payload — use template (filter emojis from task names)
-                if "task" in payload:
-                    payload["task"] = strip_emojis(payload["task"])
-                img = self.render_structured(payload)
+                if "task" in msg_payload:
+                    msg_payload["task"] = strip_emojis(msg_payload["task"])
+                img = self.render_structured(msg_payload)
             else:
                 # Fallback to plain text layout with optional subtext
-                # Detect priority from payload
-                priority = detect_priority(message, payload)
+                # Detect priority from payload (ntfy priority data)
+                priority = detect_priority(message, payload or msg_payload)
                 img = self.create_layout(strip_emojis(message), subtext=subtext, priority=priority)
         except (json.JSONDecodeError, ValueError):
             # Plain text message - strip emojis, with optional subtext
-            # Detect priority from message text
-            priority = detect_priority(message)
+            # Detect priority from ntfy payload (if provided)
+            priority = detect_priority(message, payload)
             img = self.create_layout(strip_emojis(message), subtext=subtext, priority=priority)
         
         # Preview mode - show image instead of printing
@@ -779,7 +781,8 @@ def listen(ntfy_url, preview_mode=False):
                             # enforce a local truncation/caps before printing
                             if len(msg) > MAX_MESSAGE_LENGTH:
                                 msg = msg[:MAX_MESSAGE_LENGTH-3] + "..."
-                            wp.print_msg(msg)
+                            # Extract priority from ntfy payload (numeric 1-5 scale)
+                            wp.print_msg(msg, payload=payload)
         except Exception:
             if STOP_EVENT.is_set():
                 break
