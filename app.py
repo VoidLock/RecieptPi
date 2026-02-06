@@ -430,23 +430,24 @@ class WhiteboardPrinter:
                     # Final attempt failed - reconnect for next message
                     self.connect()
                     break
-        finally:
-            if 'img' in locals():
-                try:
-                    del img
-                except Exception:
-                    pass
-            if 'img_scaled' in locals():
-                try:
-                    del img_scaled
-                except Exception:
-                    pass
-            if 'img_mono' in locals():
-                try:
-                    del img_mono
-                except Exception:
-                    pass
-            gc.collect()
+        
+        # Cleanup images after all retry attempts
+        if 'img' in locals():
+            try:
+                del img
+            except Exception:
+                pass
+        if 'img_scaled' in locals():
+            try:
+                del img_scaled
+            except Exception:
+                pass
+        if 'img_mono' in locals():
+            try:
+                del img_mono
+            except Exception:
+                pass
+        gc.collect()
 
 def listen(ntfy_url):
     global MONITOR
