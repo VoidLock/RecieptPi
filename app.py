@@ -156,6 +156,7 @@ class WhiteboardPrinter:
         # Build a simple alignment test using the same layout as regular messages
         width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
         height = int(round(width * 1.2))
+        x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
 
         canvas = Image.new('RGB', (width, height), color=(255, 255, 255))
         draw = ImageDraw.Draw(canvas)
@@ -163,14 +164,14 @@ class WhiteboardPrinter:
         # Border
         draw.rectangle([0, 0, width - 1, height - 1], outline=(0, 0, 0), width=2)
 
-        # Center line (vertical)
-        cx = width // 2
+        # Center line (vertical) - apply offset
+        cx = width // 2 + x_offset_px
         draw.line([cx, 0, cx, height], fill=(0, 0, 0), width=3)
 
         # Tick marks every 10 mm
         mm_to_px = PRINTER_DPI / 25.4
         for mm in range(0, int(PAPER_WIDTH_MM) + 1, 10):
-            x = int(round(mm * mm_to_px))
+            x = int(round(mm * mm_to_px)) + x_offset_px
             draw.line([x, 0, x, 15], fill=(0, 0, 0), width=1)
             draw.line([x, height - 15, x, height], fill=(0, 0, 0), width=1)
 
