@@ -71,6 +71,7 @@ ICON_STATUS = {
 EMOJI_MAP = {
     "🍕": "[pizza]",
     "🍔": "[burger]",
+    "🍆": "[eggplant]",
     "☕": "[coffee]",
     "🎉": "[party]",
     "✅": "[check]",
@@ -151,7 +152,7 @@ class PreviewPrinter:
         main_line_height = sample_main_bbox[3] - sample_main_bbox[1]
         sample_sub_bbox = font_reg.getbbox("Ag")
         sub_line_height = sample_sub_bbox[3] - sample_sub_bbox[1]
-        bolt_bbox = font_bold.getbbox("⚡")
+        bolt_bbox = font_bold.getbbox("🍆")
         bolt_height = bolt_bbox[3] - bolt_bbox[1]
 
         top_pad = 20
@@ -178,7 +179,7 @@ class PreviewPrinter:
         y = top_pad + y_offset_px
         # Lightning Bolt Symbol
         bolt_x = (width - (bolt_bbox[2] - bolt_bbox[0])) // 2
-        draw.text((bolt_x + left_margin, y), "⚡", font=font_bold, fill=(0, 0, 0))
+        draw.text((bolt_x + left_margin, y), "🍆", font=font_bold, fill=(0, 0, 0))
         y += bolt_height + bolt_gap
 
         for line in lines:
