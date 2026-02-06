@@ -1,0 +1,2581 @@
+import os
+import time
+import json
+import requests
+import textwrap
+import usb.core
+import usb.util
+import argparse
+import signal
+import sys
+import logging
+import threading
+import gc
+import re
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+try:
+    import psutil
+except Exception:
+    psutil = None
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance
+from pilmoji import Pilmoji
+from escpos.printer import Usb
+import qrcode
+
+# --- CONFIG (env / CLI overridable) ---
+DEFAULT_NTFY_HOST = os.environ.get("NTFY_HOST")
+DEFAULT_NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
+VENDOR_ID = int(os.environ.get("PRINTER_VENDOR", "0x0fe6"), 16)
+PRODUCT_ID = int(os.environ.get("PRINTER_PRODUCT", "0x811e"), 16)
+PRINTER_PROFILE = os.environ.get("PRINTER_PROFILE")
+MEM_THRESHOLD_PERCENT = int(os.environ.get("MEM_THRESHOLD_PERCENT", "80"))
+MEM_RESUME_PERCENT = int(os.environ.get("MEM_RESUME_PERCENT", "70"))
+MAX_MESSAGE_LENGTH = int(os.environ.get("MAX_MESSAGE_LENGTH", "300"))
+MAX_LINES = int(os.environ.get("MAX_LINES", "3"))
+# Paper and printer geometry
+PAPER_WIDTH_MM = float(os.environ.get("PAPER_WIDTH_MM", "80"))  # 80mm paper
+PRINTER_DPI = int(os.environ.get("PRINTER_DPI", "203"))
+X_OFFSET_MM = float(os.environ.get("X_OFFSET_MM", "0"))
+Y_OFFSET_MM = float(os.environ.get("Y_OFFSET_MM", "0"))
+# Max printable: 72mm on 80mm paper, 48mm on 58mm paper
+SAFE_MARGIN_MM = 4.0  # (80mm - 72mm) / 2 = 4mm margin each side
+
+# Calculate pixel dimensions (203 DPI)
+# 80mm paper = 639px total, 72mm printable = 575px usable width
+PAPER_WIDTH_PX = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))  # 639px for 80mm
+SAFE_MARGIN_PX = int(round(SAFE_MARGIN_MM / 25.4 * PRINTER_DPI))  # 32px for 4mm
+MAX_PRINTABLE_WIDTH_PX = PAPER_WIDTH_PX - (2 * SAFE_MARGIN_PX)    # 575px (72mm)
+
+# Icon mappings (ASCII-friendly for thermal printer)
+ICON_PRIORITY = {
+    "critical": "[!!!]",
+    "high": "[!!]",
+    "medium": "[!]",
+    "low": "[-]",
+}
+
+ICON_STATUS = {
+    "done": "[OK]",
+    "completed": "[OK]",
+    "in_progress": "[WIP]",
+    "wip": "[WIP]",
+    "todo": "[TODO]",
+    "blocked": "[BLOCKED]",
+    "on_hold": "[HOLD]",
+}
+
+ICON_TYPE = {
+    "task": "[T]",
+    "bug": "[B]",
+    "feature": "[F]",
+    "alert": "[A]",
+    "order": "[#]",
+    "monday_task": "[M]",
+}
+
+# Common emoji to text mappings for thermal printer compatibility
+EMOJI_MAP = {
+    "🍕": "[pizza]",
+    "🍔": "[burger]",
+    "🍆": "[eggplant]",
+    "☕": "[coffee]",
+    "🎉": "[party]",
+    "✅": "[check]",
+    "❌": "[x]",
+    "⚠️": "[warn]",
+    "🔔": "[bell]",
+    "📅": "[cal]",
+    "⏰": "[clock]",
+    "👍": "[+1]",
+    "👎": "[-1]",
+    "❤️": "[heart]",
+    "🔥": "[fire]",
+    "💡": "[idea]",
+    "📧": "[mail]",
+    "📱": "[phone]",
+    "🚨": "[alert]",
+    "✨": "[*]",
+    "⚡": "[!]",
+}
+
+# Emoji tag to Unicode mapping (for ntfy tag translation)
+EMOJI_TAG_MAP = {
+    "grinning": "😀",
+    "smiley": "😃",
+    "smile": "😄",
+    "grin": "😁",
+    "laughing": "😆",
+    "sweat_smile": "😅",
+    "rofl": "🤣",
+    "joy": "😂",
+    "slightly_smiling_face": "🙂",
+    "upside_down_face": "🙃",
+    "wink": "😉",
+    "blush": "😊",
+    "innocent": "😇",
+    "smiling_face_with_three_hearts": "🥰",
+    "heart_eyes": "😍",
+    "star_struck": "🤩",
+    "kissing_heart": "😘",
+    "kissing": "😗",
+    "relaxed": "☺️",
+    "kissing_closed_eyes": "😚",
+    "kissing_smiling_eyes": "😙",
+    "smiling_face_with_tear": "🥲",
+    "yum": "😋",
+    "stuck_out_tongue": "😛",
+    "stuck_out_tongue_winking_eye": "😜",
+    "zany_face": "🤪",
+    "stuck_out_tongue_closed_eyes": "😝",
+    "money_mouth_face": "🤑",
+    "hugs": "🤗",
+    "hand_over_mouth": "🤭",
+    "shushing_face": "🤫",
+    "thinking": "🤔",
+    "zipper_mouth_face": "🤐",
+    "raised_eyebrow": "🤨",
+    "neutral_face": "😐",
+    "expressionless": "😑",
+    "no_mouth": "😶",
+    "face_in_clouds": "😶‍🌫️",
+    "smirk": "😏",
+    "unamused": "😒",
+    "roll_eyes": "🙄",
+    "grimacing": "😬",
+    "face_exhaling": "😮‍💨",
+    "lying_face": "🤥",
+    "relieved": "😌",
+    "pensive": "😔",
+    "sleepy": "😪",
+    "drooling_face": "🤤",
+    "sleeping": "😴",
+    "mask": "😷",
+    "face_with_thermometer": "🤒",
+    "face_with_head_bandage": "🤕",
+    "nauseated_face": "🤢",
+    "vomiting_face": "🤮",
+    "sneezing_face": "🤧",
+    "hot_face": "🥵",
+    "cold_face": "🥶",
+    "woozy_face": "🥴",
+    "dizzy_face": "😵",
+    "face_with_spiral_eyes": "😵‍💫",
+    "exploding_head": "🤯",
+    "cowboy_hat_face": "🤠",
+    "partying_face": "🥳",
+    "disguised_face": "🥸",
+    "sunglasses": "😎",
+    "nerd_face": "🤓",
+    "monocle_face": "🧐",
+    "confused": "😕",
+    "worried": "😟",
+    "slightly_frowning_face": "🙁",
+    "frowning_face": "☹️",
+    "open_mouth": "😮",
+    "hushed": "😯",
+    "astonished": "😲",
+    "flushed": "😳",
+    "pleading_face": "🥺",
+    "frowning": "😦",
+    "anguished": "😧",
+    "fearful": "😨",
+    "cold_sweat": "😰",
+    "disappointed_relieved": "😥",
+    "cry": "😢",
+    "sob": "😭",
+    "scream": "😱",
+    "confounded": "😖",
+    "persevere": "😣",
+    "disappointed": "😞",
+    "sweat": "😓",
+    "weary": "😩",
+    "tired_face": "😫",
+    "yawning_face": "🥱",
+    "triumph": "😤",
+    "rage": "😡",
+    "angry": "😠",
+    "cursing_face": "🤬",
+    "smiling_imp": "😈",
+    "imp": "👿",
+    "skull": "💀",
+    "skull_and_crossbones": "☠️",
+    "hankey": "💩",
+    "clown_face": "🤡",
+    "japanese_ogre": "👹",
+    "japanese_goblin": "👺",
+    "ghost": "👻",
+    "alien": "👽",
+    "space_invader": "👾",
+    "robot": "🤖",
+    "smiley_cat": "😺",
+    "smile_cat": "😸",
+    "joy_cat": "😹",
+    "heart_eyes_cat": "😻",
+    "smirk_cat": "😼",
+    "kissing_cat": "😽",
+    "scream_cat": "🙀",
+    "crying_cat_face": "😿",
+    "pouting_cat": "😾",
+    "see_no_evil": "🙈",
+    "hear_no_evil": "🙉",
+    "speak_no_evil": "🙊",
+    "kiss": "💋",
+    "love_letter": "💌",
+    "cupid": "💘",
+    "gift_heart": "💝",
+    "sparkling_heart": "💖",
+    "heartpulse": "💗",
+    "heartbeat": "💓",
+    "revolving_hearts": "💞",
+    "two_hearts": "💕",
+    "heart_decoration": "💟",
+    "heavy_heart_exclamation": "❣️",
+    "broken_heart": "💔",
+    "heart_on_fire": "❤️‍🔥",
+    "mending_heart": "❤️‍🩹",
+    "heart": "❤️",
+    "orange_heart": "🧡",
+    "yellow_heart": "💛",
+    "green_heart": "💚",
+    "blue_heart": "💙",
+    "purple_heart": "💜",
+    "brown_heart": "🤎",
+    "black_heart": "🖤",
+    "white_heart": "🤍",
+    "100": "💯",
+    "anger": "💢",
+    "boom": "💥",
+    "dizzy": "💫",
+    "sweat_drops": "💦",
+    "dash": "💨",
+    "hole": "🕳️",
+    "bomb": "💣",
+    "speech_balloon": "💬",
+    "eye_speech_bubble": "👁️‍🗨️",
+    "left_speech_bubble": "🗨️",
+    "right_anger_bubble": "🗯️",
+    "thought_balloon": "💭",
+    "zzz": "💤",
+    "wave": "👋",
+    "raised_back_of_hand": "🤚",
+    "raised_hand_with_fingers_splayed": "🖐️",
+    "hand": "✋",
+    "vulcan_salute": "🖖",
+    "ok_hand": "👌",
+    "pinched_fingers": "🤌",
+    "pinching_hand": "🤏",
+    "v": "✌️",
+    "crossed_fingers": "🤞",
+    "love_you_gesture": "🤟",
+    "metal": "🤘",
+    "call_me_hand": "🤙",
+    "point_left": "👈",
+    "point_right": "👉",
+    "point_up_2": "👆",
+    "middle_finger": "🖕",
+    "point_down": "👇",
+    "point_up": "☝️",
+    "plus1": "👍",
+    "minus1": "👎",
+    "fist_raised": "✊",
+    "fist_oncoming": "👊",
+    "fist_left": "🤛",
+    "fist_right": "🤜",
+    "clap": "👏",
+    "raised_hands": "🙌",
+    "open_hands": "👐",
+    "palms_up_together": "🤲",
+    "handshake": "🤝",
+    "pray": "🙏",
+    "writing_hand": "✍️",
+    "nail_care": "💅",
+    "selfie": "🤳",
+    "muscle": "💪",
+    "mechanical_arm": "🦾",
+    "mechanical_leg": "🦿",
+    "leg": "🦵",
+    "foot": "🦶",
+    "ear": "👂",
+    "ear_with_hearing_aid": "🦻",
+    "nose": "👃",
+    "brain": "🧠",
+    "anatomical_heart": "🫀",
+    "lungs": "🫁",
+    "tooth": "🦷",
+    "bone": "🦴",
+    "eyes": "👀",
+    "eye": "👁️",
+    "tongue": "👅",
+    "lips": "👄",
+    "baby": "👶",
+    "child": "🧒",
+    "boy": "👦",
+    "girl": "👧",
+    "adult": "🧑",
+    "blond_haired_person": "👱",
+    "man": "👨",
+    "bearded_person": "🧔",
+    "man_beard": "🧔‍♂️",
+    "woman_beard": "🧔‍♀️",
+    "red_haired_man": "👨‍🦰",
+    "curly_haired_man": "👨‍🦱",
+    "white_haired_man": "👨‍🦳",
+    "bald_man": "👨‍🦲",
+    "woman": "👩",
+    "red_haired_woman": "👩‍🦰",
+    "person_red_hair": "🧑‍🦰",
+    "curly_haired_woman": "👩‍🦱",
+    "person_curly_hair": "🧑‍🦱",
+    "white_haired_woman": "👩‍🦳",
+    "person_white_hair": "🧑‍🦳",
+    "bald_woman": "👩‍🦲",
+    "person_bald": "🧑‍🦲",
+    "blond_haired_woman": "👱‍♀️",
+    "blond_haired_man": "👱‍♂️",
+    "older_adult": "🧓",
+    "older_man": "👴",
+    "older_woman": "👵",
+    "frowning_person": "🙍",
+    "frowning_man": "🙍‍♂️",
+    "frowning_woman": "🙍‍♀️",
+    "pouting_face": "🙎",
+    "pouting_man": "🙎‍♂️",
+    "pouting_woman": "🙎‍♀️",
+    "no_good": "🙅",
+    "no_good_man": "🙅‍♂️",
+    "no_good_woman": "🙅‍♀️",
+    "ok_person": "🙆",
+    "ok_man": "🙆‍♂️",
+    "ok_woman": "🙆‍♀️",
+    "tipping_hand_person": "💁",
+    "tipping_hand_man": "💁‍♂️",
+    "tipping_hand_woman": "💁‍♀️",
+    "raising_hand": "🙋",
+    "raising_hand_man": "🙋‍♂️",
+    "raising_hand_woman": "🙋‍♀️",
+    "deaf_person": "🧏",
+    "deaf_man": "🧏‍♂️",
+    "deaf_woman": "🧏‍♀️",
+    "bow": "🙇",
+    "bowing_man": "🙇‍♂️",
+    "bowing_woman": "🙇‍♀️",
+    "facepalm": "🤦",
+    "man_facepalming": "🤦‍♂️",
+    "woman_facepalming": "🤦‍♀️",
+    "shrug": "🤷",
+    "man_shrugging": "🤷‍♂️",
+    "woman_shrugging": "🤷‍♀️",
+    "health_worker": "🧑‍⚕️",
+    "man_health_worker": "👨‍⚕️",
+    "woman_health_worker": "👩‍⚕️",
+    "student": "🧑‍🎓",
+    "man_student": "👨‍🎓",
+    "woman_student": "👩‍🎓",
+    "teacher": "🧑‍🏫",
+    "man_teacher": "👨‍🏫",
+    "woman_teacher": "👩‍🏫",
+    "judge": "🧑‍⚖️",
+    "man_judge": "👨‍⚖️",
+    "woman_judge": "👩‍⚖️",
+    "farmer": "🧑‍🌾",
+    "man_farmer": "👨‍🌾",
+    "woman_farmer": "👩‍🌾",
+    "cook": "🧑‍🍳",
+    "man_cook": "👨‍🍳",
+    "woman_cook": "👩‍🍳",
+    "mechanic": "🧑‍🔧",
+    "man_mechanic": "👨‍🔧",
+    "woman_mechanic": "👩‍🔧",
+    "factory_worker": "🧑‍🏭",
+    "man_factory_worker": "👨‍🏭",
+    "woman_factory_worker": "👩‍🏭",
+    "office_worker": "🧑‍💼",
+    "man_office_worker": "👨‍💼",
+    "woman_office_worker": "👩‍💼",
+    "scientist": "🧑‍🔬",
+    "man_scientist": "👨‍🔬",
+    "woman_scientist": "👩‍🔬",
+    "technologist": "🧑‍💻",
+    "man_technologist": "👨‍💻",
+    "woman_technologist": "👩‍💻",
+    "singer": "🧑‍🎤",
+    "man_singer": "👨‍🎤",
+    "woman_singer": "👩‍🎤",
+    "artist": "🧑‍🎨",
+    "man_artist": "👨‍🎨",
+    "woman_artist": "👩‍🎨",
+    "pilot": "🧑‍✈️",
+    "man_pilot": "👨‍✈️",
+    "woman_pilot": "👩‍✈️",
+    "astronaut": "🧑‍🚀",
+    "man_astronaut": "👨‍🚀",
+    "woman_astronaut": "👩‍🚀",
+    "firefighter": "🧑‍🚒",
+    "man_firefighter": "👨‍🚒",
+    "woman_firefighter": "👩‍🚒",
+    "police_officer": "👮",
+    "policeman": "👮‍♂️",
+    "policewoman": "👮‍♀️",
+    "detective": "🕵️",
+    "male_detective": "🕵️‍♂️",
+    "female_detective": "🕵️‍♀️",
+    "guard": "💂",
+    "guardsman": "💂‍♂️",
+    "guardswoman": "💂‍♀️",
+    "ninja": "🥷",
+    "construction_worker": "👷",
+    "construction_worker_man": "👷‍♂️",
+    "construction_worker_woman": "👷‍♀️",
+    "prince": "🤴",
+    "princess": "👸",
+    "person_with_turban": "👳",
+    "man_with_turban": "👳‍♂️",
+    "woman_with_turban": "👳‍♀️",
+    "man_with_gua_pi_mao": "👲",
+    "woman_with_headscarf": "🧕",
+    "person_in_tuxedo": "🤵",
+    "man_in_tuxedo": "🤵‍♂️",
+    "woman_in_tuxedo": "🤵‍♀️",
+    "person_with_veil": "👰",
+    "man_with_veil": "👰‍♂️",
+    "woman_with_veil": "👰‍♀️",
+    "pregnant_woman": "🤰",
+    "breast_feeding": "🤱",
+    "woman_feeding_baby": "👩‍🍼",
+    "man_feeding_baby": "👨‍🍼",
+    "person_feeding_baby": "🧑‍🍼",
+    "angel": "👼",
+    "santa": "🎅",
+    "mrs_claus": "🤶",
+    "mx_claus": "🧑‍🎄",
+    "superhero": "🦸",
+    "superhero_man": "🦸‍♂️",
+    "superhero_woman": "🦸‍♀️",
+    "supervillain": "🦹",
+    "supervillain_man": "🦹‍♂️",
+    "supervillain_woman": "🦹‍♀️",
+    "mage": "🧙",
+    "mage_man": "🧙‍♂️",
+    "mage_woman": "🧙‍♀️",
+    "fairy": "🧚",
+    "fairy_man": "🧚‍♂️",
+    "fairy_woman": "🧚‍♀️",
+    "vampire": "🧛",
+    "vampire_man": "🧛‍♂️",
+    "vampire_woman": "🧛‍♀️",
+    "merperson": "🧜",
+    "merman": "🧜‍♂️",
+    "mermaid": "🧜‍♀️",
+    "elf": "🧝",
+    "elf_man": "🧝‍♂️",
+    "elf_woman": "🧝‍♀️",
+    "genie": "🧞",
+    "genie_man": "🧞‍♂️",
+    "genie_woman": "🧞‍♀️",
+    "zombie": "🧟",
+    "zombie_man": "🧟‍♂️",
+    "zombie_woman": "🧟‍♀️",
+    "massage": "💆",
+    "massage_man": "💆‍♂️",
+    "massage_woman": "💆‍♀️",
+    "haircut": "💇",
+    "haircut_man": "💇‍♂️",
+    "haircut_woman": "💇‍♀️",
+    "walking": "🚶",
+    "walking_man": "🚶‍♂️",
+    "walking_woman": "🚶‍♀️",
+    "standing_person": "🧍",
+    "standing_man": "🧍‍♂️",
+    "standing_woman": "🧍‍♀️",
+    "kneeling_person": "🧎",
+    "kneeling_man": "🧎‍♂️",
+    "kneeling_woman": "🧎‍♀️",
+    "person_with_probing_cane": "🧑‍🦯",
+    "man_with_probing_cane": "👨‍🦯",
+    "woman_with_probing_cane": "👩‍🦯",
+    "person_in_motorized_wheelchair": "🧑‍🦼",
+    "man_in_motorized_wheelchair": "👨‍🦼",
+    "woman_in_motorized_wheelchair": "👩‍🦼",
+    "person_in_manual_wheelchair": "🧑‍🦽",
+    "man_in_manual_wheelchair": "👨‍🦽",
+    "woman_in_manual_wheelchair": "👩‍🦽",
+    "runner": "🏃",
+    "running_man": "🏃‍♂️",
+    "running_woman": "🏃‍♀️",
+    "woman_dancing": "💃",
+    "man_dancing": "🕺",
+    "business_suit_levitating": "🕴️",
+    "dancers": "👯",
+    "dancing_men": "👯‍♂️",
+    "dancing_women": "👯‍♀️",
+    "sauna_person": "🧖",
+    "sauna_man": "🧖‍♂️",
+    "sauna_woman": "🧖‍♀️",
+    "climbing": "🧗",
+    "climbing_man": "🧗‍♂️",
+    "climbing_woman": "🧗‍♀️",
+    "person_fencing": "🤺",
+    "horse_racing": "🏇",
+    "skier": "⛷️",
+    "snowboarder": "🏂",
+    "golfing": "🏌️",
+    "golfing_man": "🏌️‍♂️",
+    "golfing_woman": "🏌️‍♀️",
+    "surfer": "🏄",
+    "surfing_man": "🏄‍♂️",
+    "surfing_woman": "🏄‍♀️",
+    "rowboat": "🚣",
+    "rowing_man": "🚣‍♂️",
+    "rowing_woman": "🚣‍♀️",
+    "swimmer": "🏊",
+    "swimming_man": "🏊‍♂️",
+    "swimming_woman": "🏊‍♀️",
+    "bouncing_ball_person": "⛹️",
+    "bouncing_ball_man": "⛹️‍♂️",
+    "bouncing_ball_woman": "⛹️‍♀️",
+    "weight_lifting": "🏋️",
+    "weight_lifting_man": "🏋️‍♂️",
+    "weight_lifting_woman": "🏋️‍♀️",
+    "bicyclist": "🚴",
+    "biking_man": "🚴‍♂️",
+    "biking_woman": "🚴‍♀️",
+    "mountain_bicyclist": "🚵",
+    "mountain_biking_man": "🚵‍♂️",
+    "mountain_biking_woman": "🚵‍♀️",
+    "cartwheeling": "🤸",
+    "man_cartwheeling": "🤸‍♂️",
+    "woman_cartwheeling": "🤸‍♀️",
+    "wrestling": "🤼",
+    "men_wrestling": "🤼‍♂️",
+    "women_wrestling": "🤼‍♀️",
+    "water_polo": "🤽",
+    "man_playing_water_polo": "🤽‍♂️",
+    "woman_playing_water_polo": "🤽‍♀️",
+    "handball_person": "🤾",
+    "man_playing_handball": "🤾‍♂️",
+    "woman_playing_handball": "🤾‍♀️",
+    "juggling_person": "🤹",
+    "man_juggling": "🤹‍♂️",
+    "woman_juggling": "🤹‍♀️",
+    "lotus_position": "🧘",
+    "lotus_position_man": "🧘‍♂️",
+    "lotus_position_woman": "🧘‍♀️",
+    "bath": "🛀",
+    "sleeping_bed": "🛌",
+    "people_holding_hands": "🧑‍🤝‍🧑",
+    "two_women_holding_hands": "👭",
+    "couple": "👫",
+    "two_men_holding_hands": "👬",
+    "couplekiss": "💏",
+    "couplekiss_man_woman": "👩‍❤️‍💋‍👨",
+    "couplekiss_man_man": "👨‍❤️‍💋‍👨",
+    "couplekiss_woman_woman": "👩‍❤️‍💋‍👩",
+    "couple_with_heart": "💑",
+    "couple_with_heart_woman_man": "👩‍❤️‍👨",
+    "couple_with_heart_man_man": "👨‍❤️‍👨",
+    "couple_with_heart_woman_woman": "👩‍❤️‍👩",
+    "family": "👪",
+    "family_man_woman_boy": "👨‍👩‍👦",
+    "family_man_woman_girl": "👨‍👩‍👧",
+    "family_man_woman_girl_boy": "👨‍👩‍👧‍👦",
+    "family_man_woman_boy_boy": "👨‍👩‍👦‍👦",
+    "family_man_woman_girl_girl": "👨‍👩‍👧‍👧",
+    "family_man_man_boy": "👨‍👨‍👦",
+    "family_man_man_girl": "👨‍👨‍👧",
+    "family_man_man_girl_boy": "👨‍👨‍👧‍👦",
+    "family_man_man_boy_boy": "👨‍👨‍👦‍👦",
+    "family_man_man_girl_girl": "👨‍👨‍👧‍👧",
+    "family_woman_woman_boy": "👩‍👩‍👦",
+    "family_woman_woman_girl": "👩‍👩‍👧",
+    "family_woman_woman_girl_boy": "👩‍👩‍👧‍👦",
+    "family_woman_woman_boy_boy": "👩‍👩‍👦‍👦",
+    "family_woman_woman_girl_girl": "👩‍👩‍👧‍👧",
+    "family_man_boy": "👨‍👦",
+    "family_man_boy_boy": "👨‍👦‍👦",
+    "family_man_girl": "👨‍👧",
+    "family_man_girl_boy": "👨‍👧‍👦",
+    "family_man_girl_girl": "👨‍👧‍👧",
+    "family_woman_boy": "👩‍👦",
+    "family_woman_boy_boy": "👩‍👦‍👦",
+    "family_woman_girl": "👩‍👧",
+    "family_woman_girl_boy": "👩‍👧‍👦",
+    "family_woman_girl_girl": "👩‍👧‍👧",
+    "speaking_head": "🗣️",
+    "bust_in_silhouette": "👤",
+    "busts_in_silhouette": "👥",
+    "people_hugging": "🫂",
+    "footprints": "👣",
+    "monkey_face": "🐵",
+    "monkey": "🐒",
+    "gorilla": "🦍",
+    "orangutan": "🦧",
+    "dog": "🐶",
+    "dog2": "🐕",
+    "guide_dog": "🦮",
+    "service_dog": "🐕‍🦺",
+    "poodle": "🐩",
+    "wolf": "🐺",
+    "fox_face": "🦊",
+    "raccoon": "🦝",
+    "cat": "🐱",
+    "cat2": "🐈",
+    "black_cat": "🐈‍⬛",
+    "lion": "🦁",
+    "tiger": "🐯",
+    "tiger2": "🐅",
+    "leopard": "🐆",
+    "horse": "🐴",
+    "racehorse": "🐎",
+    "unicorn": "🦄",
+    "zebra": "🦓",
+    "deer": "🦌",
+    "bison": "🦬",
+    "cow": "🐮",
+    "ox": "🐂",
+    "water_buffalo": "🐃",
+    "cow2": "🐄",
+    "pig": "🐷",
+    "pig2": "🐖",
+    "boar": "🐗",
+    "pig_nose": "🐽",
+    "ram": "🐏",
+    "sheep": "🐑",
+    "goat": "🐐",
+    "dromedary_camel": "🐪",
+    "camel": "🐫",
+    "llama": "🦙",
+    "giraffe": "🦒",
+    "elephant": "🐘",
+    "mammoth": "🦣",
+    "rhinoceros": "🦏",
+    "hippopotamus": "🦛",
+    "mouse": "🐭",
+    "mouse2": "🐁",
+    "rat": "🐀",
+    "hamster": "🐹",
+    "rabbit": "🐰",
+    "rabbit2": "🐇",
+    "chipmunk": "🐿️",
+    "beaver": "🦫",
+    "hedgehog": "🦔",
+    "bat": "🦇",
+    "bear": "🐻",
+    "polar_bear": "🐻‍❄️",
+    "koala": "🐨",
+    "panda_face": "🐼",
+    "sloth": "🦥",
+    "otter": "🦦",
+    "skunk": "🦨",
+    "kangaroo": "🦘",
+    "badger": "🦡",
+    "feet": "🐾",
+    "turkey": "🦃",
+    "chicken": "🐔",
+    "rooster": "🐓",
+    "hatching_chick": "🐣",
+    "baby_chick": "🐤",
+    "hatched_chick": "🐥",
+    "bird": "🐦",
+    "penguin": "🐧",
+    "dove": "🕊️",
+    "eagle": "🦅",
+    "duck": "🦆",
+    "swan": "🦢",
+    "owl": "🦉",
+    "dodo": "🦤",
+    "feather": "🪶",
+    "flamingo": "🦩",
+    "peacock": "🦚",
+    "parrot": "🦜",
+    "frog": "🐸",
+    "crocodile": "🐊",
+    "turtle": "🐢",
+    "lizard": "🦎",
+    "snake": "🐍",
+    "dragon_face": "🐲",
+    "dragon": "🐉",
+    "sauropod": "🦕",
+    "t-rex": "🦖",
+    "whale": "🐳",
+    "whale2": "🐋",
+    "dolphin": "🐬",
+    "seal": "🦭",
+    "fish": "🐟",
+    "tropical_fish": "🐠",
+    "blowfish": "🐡",
+    "shark": "🦈",
+    "octopus": "🐙",
+    "shell": "🐚",
+    "snail": "🐌",
+    "butterfly": "🦋",
+    "bug": "🐛",
+    "ant": "🐜",
+    "bee": "🐝",
+    "beetle": "🪲",
+    "lady_beetle": "🐞",
+    "cricket": "🦗",
+    "cockroach": "🪳",
+    "spider": "🕷️",
+    "spider_web": "🕸️",
+    "scorpion": "🦂",
+    "mosquito": "🦟",
+    "fly": "🪰",
+    "worm": "🪱",
+    "microbe": "🦠",
+    "bouquet": "💐",
+    "cherry_blossom": "🌸",
+    "white_flower": "💮",
+    "rosette": "🏵️",
+    "rose": "🌹",
+    "wilted_flower": "🥀",
+    "hibiscus": "🌺",
+    "sunflower": "🌻",
+    "blossom": "🌼",
+    "tulip": "🌷",
+    "seedling": "🌱",
+    "potted_plant": "🪴",
+    "evergreen_tree": "🌲",
+    "deciduous_tree": "🌳",
+    "palm_tree": "🌴",
+    "cactus": "🌵",
+    "ear_of_rice": "🌾",
+    "herb": "🌿",
+    "shamrock": "☘️",
+    "four_leaf_clover": "🍀",
+    "maple_leaf": "🍁",
+    "fallen_leaf": "🍂",
+    "leaves": "🍃",
+    "grapes": "🍇",
+    "melon": "🍈",
+    "watermelon": "🍉",
+    "tangerine": "🍊",
+    "lemon": "🍋",
+    "banana": "🍌",
+    "pineapple": "🍍",
+    "mango": "🥭",
+    "apple": "🍎",
+    "green_apple": "🍏",
+    "pear": "🍐",
+    "peach": "🍑",
+    "cherries": "🍒",
+    "strawberry": "🍓",
+    "blueberries": "🫐",
+    "kiwi_fruit": "🥝",
+    "tomato": "🍅",
+    "olive": "🫒",
+    "coconut": "🥥",
+    "avocado": "🥑",
+    "eggplant": "🍆",
+    "potato": "🥔",
+    "carrot": "🥕",
+    "corn": "🌽",
+    "hot_pepper": "🌶️",
+    "bell_pepper": "🫑",
+    "cucumber": "🥒",
+    "leafy_green": "🥬",
+    "broccoli": "🥦",
+    "garlic": "🧄",
+    "onion": "🧅",
+    "mushroom": "🍄",
+    "peanuts": "🥜",
+    "chestnut": "🌰",
+    "bread": "🍞",
+    "croissant": "🥐",
+    "baguette_bread": "🥖",
+    "flatbread": "🫓",
+    "pretzel": "🥨",
+    "bagel": "🥯",
+    "pancakes": "🥞",
+    "waffle": "🧇",
+    "cheese": "🧀",
+    "meat_on_bone": "🍖",
+    "poultry_leg": "🍗",
+    "cut_of_meat": "🥩",
+    "bacon": "🥓",
+    "hamburger": "🍔",
+    "fries": "🍟",
+    "pizza": "🍕",
+    "hotdog": "🌭",
+    "sandwich": "🥪",
+    "taco": "🌮",
+    "burrito": "🌯",
+    "tamale": "🫔",
+    "stuffed_flatbread": "🥙",
+    "falafel": "🧆",
+    "egg": "🥚",
+    "fried_egg": "🍳",
+    "shallow_pan_of_food": "🥘",
+    "stew": "🍲",
+    "fondue": "🫕",
+    "bowl_with_spoon": "🥣",
+    "green_salad": "🥗",
+    "popcorn": "🍿",
+    "butter": "🧈",
+    "salt": "🧂",
+    "canned_food": "🥫",
+    "bento": "🍱",
+    "rice_cracker": "🍘",
+    "rice_ball": "🍙",
+    "rice": "🍚",
+    "curry": "🍛",
+    "ramen": "🍜",
+    "spaghetti": "🍝",
+    "sweet_potato": "🍠",
+    "oden": "🍢",
+    "sushi": "🍣",
+    "fried_shrimp": "🍤",
+    "fish_cake": "🍥",
+    "moon_cake": "🥮",
+    "dango": "🍡",
+    "dumpling": "🥟",
+    "fortune_cookie": "🥠",
+    "takeout_box": "🥡",
+    "crab": "🦀",
+    "lobster": "🦞",
+    "shrimp": "🦐",
+    "squid": "🦑",
+    "oyster": "🦪",
+    "icecream": "🍦",
+    "shaved_ice": "🍧",
+    "ice_cream": "🍨",
+    "doughnut": "🍩",
+    "cookie": "🍪",
+    "birthday": "🎂",
+    "cake": "🍰",
+    "cupcake": "🧁",
+    "pie": "🥧",
+    "chocolate_bar": "🍫",
+    "candy": "🍬",
+    "lollipop": "🍭",
+    "custard": "🍮",
+    "honey_pot": "🍯",
+    "baby_bottle": "🍼",
+    "milk_glass": "🥛",
+    "coffee": "☕",
+    "teapot": "🫖",
+    "tea": "🍵",
+    "sake": "🍶",
+    "champagne": "🍾",
+    "wine_glass": "🍷",
+    "cocktail": "🍸",
+    "tropical_drink": "🍹",
+    "beer": "🍺",
+    "beers": "🍻",
+    "clinking_glasses": "🥂",
+    "tumbler_glass": "🥃",
+    "cup_with_straw": "🥤",
+    "bubble_tea": "🧋",
+    "beverage_box": "🧃",
+    "mate": "🧉",
+    "ice_cube": "🧊",
+    "chopsticks": "🥢",
+    "plate_with_cutlery": "🍽️",
+    "fork_and_knife": "🍴",
+    "spoon": "🥄",
+    "hocho": "🔪",
+    "amphora": "🏺",
+    "earth_africa": "🌍",
+    "earth_americas": "🌎",
+    "earth_asia": "🌏",
+    "globe_with_meridians": "🌐",
+    "world_map": "🗺️",
+    "japan": "🗾",
+    "compass": "🧭",
+    "mountain_snow": "🏔️",
+    "mountain": "⛰️",
+    "volcano": "🌋",
+    "mount_fuji": "🗻",
+    "camping": "🏕️",
+    "beach_umbrella": "🏖️",
+    "desert": "🏜️",
+    "desert_island": "🏝️",
+    "national_park": "🏞️",
+    "stadium": "🏟️",
+    "classical_building": "🏛️",
+    "building_construction": "🏗️",
+    "bricks": "🧱",
+    "rock": "🪨",
+    "wood": "🪵",
+    "hut": "🛖",
+    "houses": "🏘️",
+    "derelict_house": "🏚️",
+    "house": "🏠",
+    "house_with_garden": "🏡",
+    "office": "🏢",
+    "post_office": "🏣",
+    "european_post_office": "🏤",
+    "hospital": "🏥",
+    "bank": "🏦",
+    "hotel": "🏨",
+    "love_hotel": "🏩",
+    "convenience_store": "🏪",
+    "school": "🏫",
+    "department_store": "🏬",
+    "factory": "🏭",
+    "japanese_castle": "🏯",
+    "european_castle": "🏰",
+    "wedding": "💒",
+    "tokyo_tower": "🗼",
+    "statue_of_liberty": "🗽",
+    "church": "⛪",
+    "mosque": "🕌",
+    "hindu_temple": "🛕",
+    "synagogue": "🕍",
+    "shinto_shrine": "⛩️",
+    "kaaba": "🕋",
+    "fountain": "⛲",
+    "tent": "⛺",
+    "foggy": "🌁",
+    "night_with_stars": "🌃",
+    "cityscape": "🏙️",
+    "sunrise_over_mountains": "🌄",
+    "sunrise": "🌅",
+    "city_sunset": "🌆",
+    "city_sunrise": "🌇",
+    "bridge_at_night": "🌉",
+    "hotsprings": "♨️",
+    "carousel_horse": "🎠",
+    "ferris_wheel": "🎡",
+    "roller_coaster": "🎢",
+    "barber": "💈",
+    "circus_tent": "🎪",
+    "steam_locomotive": "🚂",
+    "railway_car": "🚃",
+    "bullettrain_side": "🚄",
+    "bullettrain_front": "🚅",
+    "train2": "🚆",
+    "metro": "🚇",
+    "light_rail": "🚈",
+    "station": "🚉",
+    "tram": "🚊",
+    "monorail": "🚝",
+    "mountain_railway": "🚞",
+    "train": "🚋",
+    "bus": "🚌",
+    "oncoming_bus": "🚍",
+    "trolleybus": "🚎",
+    "minibus": "🚐",
+    "ambulance": "🚑",
+    "fire_engine": "🚒",
+    "police_car": "🚓",
+    "oncoming_police_car": "🚔",
+    "taxi": "🚕",
+    "oncoming_taxi": "🚖",
+    "car": "🚗",
+    "oncoming_automobile": "🚘",
+    "blue_car": "🚙",
+    "pickup_truck": "🛻",
+    "truck": "🚚",
+    "articulated_lorry": "🚛",
+    "tractor": "🚜",
+    "racing_car": "🏎️",
+    "motorcycle": "🏍️",
+    "motor_scooter": "🛵",
+    "manual_wheelchair": "🦽",
+    "motorized_wheelchair": "🦼",
+    "auto_rickshaw": "🛺",
+    "bike": "🚲",
+    "kick_scooter": "🛴",
+    "skateboard": "🛹",
+    "roller_skate": "🛼",
+    "busstop": "🚏",
+    "motorway": "🛣️",
+    "railway_track": "🛤️",
+    "oil_drum": "🛢️",
+    "fuelpump": "⛽",
+    "rotating_light": "🚨",
+    "traffic_light": "🚥",
+    "vertical_traffic_light": "🚦",
+    "stop_sign": "🛑",
+    "construction": "🚧",
+    "anchor": "⚓",
+    "boat": "⛵",
+    "canoe": "🛶",
+    "speedboat": "🚤",
+    "passenger_ship": "🛳️",
+    "ferry": "⛴️",
+    "motor_boat": "🛥️",
+    "ship": "🚢",
+    "airplane": "✈️",
+    "small_airplane": "🛩️",
+    "flight_departure": "🛫",
+    "flight_arrival": "🛬",
+    "parachute": "🪂",
+    "seat": "💺",
+    "helicopter": "🚁",
+    "suspension_railway": "🚟",
+    "mountain_cableway": "🚠",
+    "aerial_tramway": "🚡",
+    "artificial_satellite": "🛰️",
+    "rocket": "🚀",
+    "flying_saucer": "🛸",
+    "bellhop_bell": "🛎️",
+    "luggage": "🧳",
+    "hourglass": "⌛",
+    "hourglass_flowing_sand": "⏳",
+    "watch": "⌚",
+    "alarm_clock": "⏰",
+    "stopwatch": "⏱️",
+    "timer_clock": "⏲️",
+    "mantelpiece_clock": "🕰️",
+    "clock12": "🕛",
+    "clock1230": "🕧",
+    "clock1": "🕐",
+    "clock130": "🕜",
+    "clock2": "🕑",
+    "clock230": "🕝",
+    "clock3": "🕒",
+    "clock330": "🕞",
+    "clock4": "🕓",
+    "clock430": "🕟",
+    "clock5": "🕔",
+    "clock530": "🕠",
+    "clock6": "🕕",
+    "clock630": "🕡",
+    "clock7": "🕖",
+    "clock730": "🕢",
+    "clock8": "🕗",
+    "clock830": "🕣",
+    "clock9": "🕘",
+    "clock930": "🕤",
+    "clock10": "🕙",
+    "clock1030": "🕥",
+    "clock11": "🕚",
+    "clock1130": "🕦",
+    "new_moon": "🌑",
+    "waxing_crescent_moon": "🌒",
+    "first_quarter_moon": "🌓",
+    "moon": "🌔",
+    "full_moon": "🌕",
+    "waning_gibbous_moon": "🌖",
+    "last_quarter_moon": "🌗",
+    "waning_crescent_moon": "🌘",
+    "crescent_moon": "🌙",
+    "new_moon_with_face": "🌚",
+    "first_quarter_moon_with_face": "🌛",
+    "last_quarter_moon_with_face": "🌜",
+    "thermometer": "🌡️",
+    "sunny": "☀️",
+    "full_moon_with_face": "🌝",
+    "sun_with_face": "🌞",
+    "ringed_planet": "🪐",
+    "star": "⭐",
+    "star2": "🌟",
+    "stars": "🌠",
+    "milky_way": "🌌",
+    "cloud": "☁️",
+    "partly_sunny": "⛅",
+    "cloud_with_lightning_and_rain": "⛈️",
+    "sun_behind_small_cloud": "🌤️",
+    "sun_behind_large_cloud": "🌥️",
+    "sun_behind_rain_cloud": "🌦️",
+    "cloud_with_rain": "🌧️",
+    "cloud_with_snow": "🌨️",
+    "cloud_with_lightning": "🌩️",
+    "tornado": "🌪️",
+    "fog": "🌫️",
+    "wind_face": "🌬️",
+    "cyclone": "🌀",
+    "rainbow": "🌈",
+    "closed_umbrella": "🌂",
+    "open_umbrella": "☂️",
+    "umbrella": "☔",
+    "parasol_on_ground": "⛱️",
+    "zap": "⚡",
+    "snowflake": "❄️",
+    "snowman_with_snow": "☃️",
+    "snowman": "⛄",
+    "comet": "☄️",
+    "fire": "🔥",
+    "droplet": "💧",
+    "ocean": "🌊",
+    "jack_o_lantern": "🎃",
+    "christmas_tree": "🎄",
+    "fireworks": "🎆",
+    "sparkler": "🎇",
+    "firecracker": "🧨",
+    "sparkles": "✨",
+    "balloon": "🎈",
+    "tada": "🎉",
+    "confetti_ball": "🎊",
+    "tanabata_tree": "🎋",
+    "bamboo": "🎍",
+    "dolls": "🎎",
+    "flags": "🎏",
+    "wind_chime": "🎐",
+    "rice_scene": "🎑",
+    "red_envelope": "🧧",
+    "ribbon": "🎀",
+    "gift": "🎁",
+    "reminder_ribbon": "🎗️",
+    "tickets": "🎟️",
+    "ticket": "🎫",
+    "medal_military": "🎖️",
+    "trophy": "🏆",
+    "medal_sports": "🏅",
+    "1st_place_medal": "🥇",
+    "2nd_place_medal": "🥈",
+    "3rd_place_medal": "🥉",
+    "soccer": "⚽",
+    "baseball": "⚾",
+    "softball": "🥎",
+    "basketball": "🏀",
+    "volleyball": "🏐",
+    "football": "🏈",
+    "rugby_football": "🏉",
+    "tennis": "🎾",
+    "flying_disc": "🥏",
+    "bowling": "🎳",
+    "cricket_game": "🏏",
+    "field_hockey": "🏑",
+    "ice_hockey": "🏒",
+    "lacrosse": "🥍",
+    "ping_pong": "🏓",
+    "badminton": "🏸",
+    "boxing_glove": "🥊",
+    "martial_arts_uniform": "🥋",
+    "goal_net": "🥅",
+    "golf": "⛳",
+    "ice_skate": "⛸️",
+    "fishing_pole_and_fish": "🎣",
+    "diving_mask": "🤿",
+    "running_shirt_with_sash": "🎽",
+    "ski": "🎿",
+    "sled": "🛷",
+    "curling_stone": "🥌",
+    "dart": "🎯",
+    "yo_yo": "🪀",
+    "kite": "🪁",
+    "8ball": "🎱",
+    "crystal_ball": "🔮",
+    "magic_wand": "🪄",
+    "nazar_amulet": "🧿",
+    "video_game": "🎮",
+    "joystick": "🕹️",
+    "slot_machine": "🎰",
+    "game_die": "🎲",
+    "jigsaw": "🧩",
+    "teddy_bear": "🧸",
+    "pinata": "🪅",
+    "nesting_dolls": "🪆",
+    "spades": "♠️",
+    "hearts": "♥️",
+    "diamonds": "♦️",
+    "clubs": "♣️",
+    "chess_pawn": "♟️",
+    "black_joker": "🃏",
+    "mahjong": "🀄",
+    "flower_playing_cards": "🎴",
+    "performing_arts": "🎭",
+    "framed_picture": "🖼️",
+    "art": "🎨",
+    "thread": "🧵",
+    "sewing_needle": "🪡",
+    "yarn": "🧶",
+    "knot": "🪢",
+    "eyeglasses": "👓",
+    "dark_sunglasses": "🕶️",
+    "goggles": "🥽",
+    "lab_coat": "🥼",
+    "safety_vest": "🦺",
+    "necktie": "👔",
+    "shirt": "👕",
+    "jeans": "👖",
+    "scarf": "🧣",
+    "gloves": "🧤",
+    "coat": "🧥",
+    "socks": "🧦",
+    "dress": "👗",
+    "kimono": "👘",
+    "sari": "🥻",
+    "one_piece_swimsuit": "🩱",
+    "swim_brief": "🩲",
+    "shorts": "🩳",
+    "bikini": "👙",
+    "womans_clothes": "👚",
+    "purse": "👛",
+    "handbag": "👜",
+    "pouch": "👝",
+    "shopping": "🛍️",
+    "school_satchel": "🎒",
+    "thong_sandal": "🩴",
+    "mans_shoe": "👞",
+    "athletic_shoe": "👟",
+    "hiking_boot": "🥾",
+    "flat_shoe": "🥿",
+    "high_heel": "👠",
+    "sandal": "👡",
+    "ballet_shoes": "🩰",
+    "boot": "👢",
+    "crown": "👑",
+    "womans_hat": "👒",
+    "tophat": "🎩",
+    "mortar_board": "🎓",
+    "billed_cap": "🧢",
+    "military_helmet": "🪖",
+    "rescue_worker_helmet": "⛑️",
+    "prayer_beads": "📿",
+    "lipstick": "💄",
+    "ring": "💍",
+    "gem": "💎",
+    "mute": "🔇",
+    "speaker": "🔈",
+    "sound": "🔉",
+    "loud_sound": "🔊",
+    "loudspeaker": "📢",
+    "mega": "📣",
+    "postal_horn": "📯",
+    "bell": "🔔",
+    "no_bell": "🔕",
+    "musical_score": "🎼",
+    "musical_note": "🎵",
+    "notes": "🎶",
+    "studio_microphone": "🎙️",
+    "level_slider": "🎚️",
+    "control_knobs": "🎛️",
+    "microphone": "🎤",
+    "headphones": "🎧",
+    "radio": "📻",
+    "saxophone": "🎷",
+    "accordion": "🪗",
+    "guitar": "🎸",
+    "musical_keyboard": "🎹",
+    "trumpet": "🎺",
+    "violin": "🎻",
+    "banjo": "🪕",
+    "drum": "🥁",
+    "long_drum": "🪘",
+    "iphone": "📱",
+    "calling": "📲",
+    "phone": "☎️",
+    "telephone_receiver": "📞",
+    "pager": "📟",
+    "fax": "📠",
+    "battery": "🔋",
+    "electric_plug": "🔌",
+    "computer": "💻",
+    "desktop_computer": "🖥️",
+    "printer": "🖨️",
+    "keyboard": "⌨️",
+    "computer_mouse": "🖱️",
+    "trackball": "🖲️",
+    "minidisc": "💽",
+    "floppy_disk": "💾",
+    "cd": "💿",
+    "dvd": "📀",
+    "abacus": "🧮",
+    "movie_camera": "🎥",
+    "film_strip": "🎞️",
+    "film_projector": "📽️",
+    "clapper": "🎬",
+    "tv": "📺",
+    "camera": "📷",
+    "camera_flash": "📸",
+    "video_camera": "📹",
+    "vhs": "📼",
+    "mag": "🔍",
+    "mag_right": "🔎",
+    "candle": "🕯️",
+    "bulb": "💡",
+    "flashlight": "🔦",
+    "izakaya_lantern": "🏮",
+    "diya_lamp": "🪔",
+    "notebook_with_decorative_cover": "📔",
+    "closed_book": "📕",
+    "book": "📖",
+    "green_book": "📗",
+    "blue_book": "📘",
+    "orange_book": "📙",
+    "books": "📚",
+    "notebook": "📓",
+    "ledger": "📒",
+    "page_with_curl": "📃",
+    "scroll": "📜",
+    "page_facing_up": "📄",
+    "newspaper": "📰",
+    "newspaper_roll": "🗞️",
+    "bookmark_tabs": "📑",
+    "bookmark": "🔖",
+    "label": "🏷️",
+    "moneybag": "💰",
+    "coin": "🪙",
+    "yen": "💴",
+    "dollar": "💵",
+    "euro": "💶",
+    "pound": "💷",
+    "money_with_wings": "💸",
+    "credit_card": "💳",
+    "receipt": "🧾",
+    "chart": "💹",
+    "envelope": "✉️",
+    "email": "📧",
+    "incoming_envelope": "📨",
+    "envelope_with_arrow": "📩",
+    "outbox_tray": "📤",
+    "inbox_tray": "📥",
+    "package": "📦",
+    "mailbox": "📫",
+    "mailbox_closed": "📪",
+    "mailbox_with_mail": "📬",
+    "mailbox_with_no_mail": "📭",
+    "postbox": "📮",
+    "ballot_box": "🗳️",
+    "pencil2": "✏️",
+    "black_nib": "✒️",
+    "fountain_pen": "🖋️",
+    "pen": "🖊️",
+    "paintbrush": "🖌️",
+    "crayon": "🖍️",
+    "memo": "📝",
+    "briefcase": "💼",
+    "file_folder": "📁",
+    "open_file_folder": "📂",
+    "card_index_dividers": "🗂️",
+    "date": "📅",
+    "calendar": "📆",
+    "spiral_notepad": "🗒️",
+    "spiral_calendar": "🗓️",
+    "card_index": "📇",
+    "chart_with_upwards_trend": "📈",
+    "chart_with_downwards_trend": "📉",
+    "bar_chart": "📊",
+    "clipboard": "📋",
+    "pushpin": "📌",
+    "round_pushpin": "📍",
+    "paperclip": "📎",
+    "paperclips": "🖇️",
+    "straight_ruler": "📏",
+    "triangular_ruler": "📐",
+    "scissors": "✂️",
+    "card_file_box": "🗃️",
+    "file_cabinet": "🗄️",
+    "wastebasket": "🗑️",
+    "lock": "🔒",
+    "unlock": "🔓",
+    "lock_with_ink_pen": "🔏",
+    "closed_lock_with_key": "🔐",
+    "key": "🔑",
+    "old_key": "🗝️",
+    "hammer": "🔨",
+    "axe": "🪓",
+    "pick": "⛏️",
+    "hammer_and_pick": "⚒️",
+    "hammer_and_wrench": "🛠️",
+    "dagger": "🗡️",
+    "crossed_swords": "⚔️",
+    "gun": "🔫",
+    "boomerang": "🪃",
+    "bow_and_arrow": "🏹",
+    "shield": "🛡️",
+    "carpentry_saw": "🪚",
+    "wrench": "🔧",
+    "screwdriver": "🪛",
+    "nut_and_bolt": "🔩",
+    "gear": "⚙️",
+    "clamp": "🗜️",
+    "balance_scale": "⚖️",
+    "probing_cane": "🦯",
+    "link": "🔗",
+    "chains": "⛓️",
+    "hook": "🪝",
+    "toolbox": "🧰",
+    "magnet": "🧲",
+    "ladder": "🪜",
+    "alembic": "⚗️",
+    "test_tube": "🧪",
+    "petri_dish": "🧫",
+    "dna": "🧬",
+    "microscope": "🔬",
+    "telescope": "🔭",
+    "satellite": "📡",
+    "syringe": "💉",
+    "drop_of_blood": "🩸",
+    "pill": "💊",
+    "adhesive_bandage": "🩹",
+    "stethoscope": "🩺",
+    "door": "🚪",
+    "elevator": "🛗",
+    "mirror": "🪞",
+    "window": "🪟",
+    "bed": "🛏️",
+    "couch_and_lamp": "🛋️",
+    "chair": "🪑",
+    "toilet": "🚽",
+    "plunger": "🪠",
+    "shower": "🚿",
+    "bathtub": "🛁",
+    "mouse_trap": "🪤",
+    "razor": "🪒",
+    "lotion_bottle": "🧴",
+    "safety_pin": "🧷",
+    "broom": "🧹",
+    "basket": "🧺",
+    "roll_of_paper": "🧻",
+    "bucket": "🪣",
+    "soap": "🧼",
+    "toothbrush": "🪥",
+    "sponge": "🧽",
+    "fire_extinguisher": "🧯",
+    "shopping_cart": "🛒",
+    "smoking": "🚬",
+    "coffin": "⚰️",
+    "headstone": "🪦",
+    "funeral_urn": "⚱️",
+    "moyai": "🗿",
+    "placard": "🪧",
+    "atm": "🏧",
+    "put_litter_in_its_place": "🚮",
+    "potable_water": "🚰",
+    "wheelchair": "♿",
+    "mens": "🚹",
+    "womens": "🚺",
+    "restroom": "🚻",
+    "baby_symbol": "🚼",
+    "wc": "🚾",
+    "passport_control": "🛂",
+    "customs": "🛃",
+    "baggage_claim": "🛄",
+    "left_luggage": "🛅",
+    "warning": "⚠️",
+    "children_crossing": "🚸",
+    "no_entry": "⛔",
+    "no_entry_sign": "🚫",
+    "no_bicycles": "🚳",
+    "no_smoking": "🚭",
+    "do_not_litter": "🚯",
+    "non-potable_water": "🚱",
+    "no_pedestrians": "🚷",
+    "no_mobile_phones": "📵",
+    "underage": "🔞",
+    "radioactive": "☢️",
+    "biohazard": "☣️",
+    "arrow_up": "⬆️",
+    "arrow_upper_right": "↗️",
+    "arrow_right": "➡️",
+    "arrow_lower_right": "↘️",
+    "arrow_down": "⬇️",
+    "arrow_lower_left": "↙️",
+    "arrow_left": "⬅️",
+    "arrow_upper_left": "↖️",
+    "arrow_up_down": "↕️",
+    "left_right_arrow": "↔️",
+    "leftwards_arrow_with_hook": "↩️",
+    "arrow_right_hook": "↪️",
+    "arrow_heading_up": "⤴️",
+    "arrow_heading_down": "⤵️",
+    "arrows_clockwise": "🔃",
+    "arrows_counterclockwise": "🔄",
+    "back": "🔙",
+    "end": "🔚",
+    "on": "🔛",
+    "soon": "🔜",
+    "top": "🔝",
+    "place_of_worship": "🛐",
+    "atom_symbol": "⚛️",
+    "om": "🕉️",
+    "star_of_david": "✡️",
+    "wheel_of_dharma": "☸️",
+    "yin_yang": "☯️",
+    "latin_cross": "✝️",
+    "orthodox_cross": "☦️",
+    "star_and_crescent": "☪️",
+    "peace_symbol": "☮️",
+    "menorah": "🕎",
+    "six_pointed_star": "🔯",
+    "aries": "♈",
+    "taurus": "♉",
+    "gemini": "♊",
+    "cancer": "♋",
+    "leo": "♌",
+    "virgo": "♍",
+    "libra": "♎",
+    "scorpius": "♏",
+    "sagittarius": "♐",
+    "capricorn": "♑",
+    "aquarius": "♒",
+    "pisces": "♓",
+    "ophiuchus": "⛎",
+    "twisted_rightwards_arrows": "🔀",
+    "repeat": "🔁",
+    "repeat_one": "🔂",
+    "arrow_forward": "▶️",
+    "fast_forward": "⏩",
+    "next_track_button": "⏭️",
+    "play_or_pause_button": "⏯️",
+    "arrow_backward": "◀️",
+    "rewind": "⏪",
+    "previous_track_button": "⏮️",
+    "arrow_up_small": "🔼",
+    "arrow_double_up": "⏫",
+    "arrow_down_small": "🔽",
+    "arrow_double_down": "⏬",
+    "pause_button": "⏸️",
+    "stop_button": "⏹️",
+    "record_button": "⏺️",
+    "eject_button": "⏏️",
+    "cinema": "🎦",
+    "low_brightness": "🔅",
+    "high_brightness": "🔆",
+    "signal_strength": "📶",
+    "vibration_mode": "📳",
+    "mobile_phone_off": "📴",
+    "female_sign": "♀️",
+    "male_sign": "♂️",
+    "transgender_symbol": "⚧️",
+    "heavy_multiplication_x": "✖️",
+    "heavy_plus_sign": "➕",
+    "heavy_minus_sign": "➖",
+    "heavy_division_sign": "➗",
+    "infinity": "♾️",
+    "bangbang": "‼️",
+    "interrobang": "⁉️",
+    "question": "❓",
+    "grey_question": "❔",
+    "grey_exclamation": "❕",
+    "exclamation": "❗",
+    "wavy_dash": "〰️",
+    "currency_exchange": "💱",
+    "heavy_dollar_sign": "💲",
+    "medical_symbol": "⚕️",
+    "recycle": "♻️",
+    "fleur_de_lis": "⚜️",
+    "trident": "🔱",
+    "name_badge": "📛",
+    "beginner": "🔰",
+    "o": "⭕",
+    "white_check_mark": "✅",
+    "ballot_box_with_check": "☑️",
+    "heavy_check_mark": "✔️",
+    "x": "❌",
+    "negative_squared_cross_mark": "❎",
+    "curly_loop": "➰",
+    "loop": "➿",
+    "part_alternation_mark": "〽️",
+    "eight_spoked_asterisk": "✳️",
+    "eight_pointed_black_star": "✴️",
+    "sparkle": "❇️",
+    "copyright": "©️",
+    "registered": "®️",
+    "tm": "™️",
+    "hash": "#️⃣",
+    "asterisk": "*️⃣",
+    "zero": "0️⃣",
+    "one": "1️⃣",
+    "two": "2️⃣",
+    "three": "3️⃣",
+    "four": "4️⃣",
+    "five": "5️⃣",
+    "six": "6️⃣",
+    "seven": "7️⃣",
+    "eight": "8️⃣",
+    "nine": "9️⃣",
+    "keycap_ten": "🔟",
+    "capital_abcd": "🔠",
+    "abcd": "🔡",
+    "1234": "🔢",
+    "symbols": "🔣",
+    "abc": "🔤",
+    "a": "🅰️",
+    "ab": "🆎",
+    "b": "🅱️",
+    "cl": "🆑",
+    "cool": "🆒",
+    "free": "🆓",
+    "information_source": "ℹ️",
+    "id": "🆔",
+    "m": "Ⓜ️",
+    "new": "🆕",
+    "ng": "🆖",
+    "o2": "🅾️",
+    "ok": "🆗",
+    "parking": "🅿️",
+    "sos": "🆘",
+    "up": "🆙",
+    "vs": "🆚",
+    "koko": "🈁",
+    "sa": "🈂️",
+    "u6708": "🈷️",
+    "u6709": "🈶",
+    "u6307": "🈯",
+    "ideograph_advantage": "🉐",
+    "u5272": "🈹",
+    "u7121": "🈚",
+    "u7981": "🈲",
+    "accept": "🉑",
+    "u7533": "🈸",
+    "u5408": "🈴",
+    "u7a7a": "🈳",
+    "congratulations": "㊗️",
+    "secret": "㊙️",
+    "u55b6": "🈺",
+    "u6e80": "🈵",
+    "red_circle": "🔴",
+    "orange_circle": "🟠",
+    "yellow_circle": "🟡",
+    "green_circle": "🟢",
+    "large_blue_circle": "🔵",
+    "purple_circle": "🟣",
+    "brown_circle": "🟤",
+    "black_circle": "⚫",
+    "white_circle": "⚪",
+    "red_square": "🟥",
+    "orange_square": "🟧",
+    "yellow_square": "🟨",
+    "green_square": "🟩",
+    "blue_square": "🟦",
+    "purple_square": "🟪",
+    "brown_square": "🟫",
+    "black_large_square": "⬛",
+    "white_large_square": "⬜",
+    "black_medium_square": "◼️",
+    "white_medium_square": "◻️",
+    "black_medium_small_square": "◾",
+    "white_medium_small_square": "◽",
+    "black_small_square": "▪️",
+    "white_small_square": "▫️",
+    "large_orange_diamond": "🔶",
+    "large_blue_diamond": "🔷",
+    "small_orange_diamond": "🔸",
+    "small_blue_diamond": "🔹",
+    "small_red_triangle": "🔺",
+    "small_red_triangle_down": "🔻",
+    "diamond_shape_with_a_dot_inside": "💠",
+    "radio_button": "🔘",
+    "white_square_button": "🔳",
+    "black_square_button": "🔲",
+    "checkered_flag": "🏁",
+    "triangular_flag_on_post": "🚩",
+    "crossed_flags": "🎌",
+    "black_flag": "🏴",
+    "white_flag": "🏳️",
+    "rainbow_flag": "🏳️‍🌈",
+    "transgender_flag": "🏳️‍⚧️",
+    "pirate_flag": "🏴‍☠️",
+}
+
+
+def strip_emojis(text):
+    """Remove or replace emojis with ASCII alternatives for thermal printer."""
+    # First try specific mappings
+    for emoji, replacement in EMOJI_MAP.items():
+        text = text.replace(emoji, replacement)
+    
+    # Remove any remaining emojis (Unicode ranges for common emoji blocks)
+    # This regex covers most emoji ranges
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F680-\U0001F6FF"  # transport & map symbols
+        "\U0001F1E0-\U0001F1FF"  # flags (iOS)
+        "\U00002702-\U000027B0"  # dingbats
+        "\U000024C2-\U0001F251"
+        "\U0001F900-\U0001F9FF"  # supplemental symbols
+        "\U0001FA00-\U0001FA6F"  # extended symbols
+        "]+", flags=re.UNICODE
+    )
+    text = emoji_pattern.sub('', text)
+    return text
+
+def detect_priority(message, payload=None):
+    """Detect priority level from ntfy message payload.
+    
+    Supports:
+    - ntfy numeric priority (1-5 scale)
+    - Explicit priority field in JSON payload
+    - Priority header values (min, low, default, high, max, urgent)
+    
+    Returns: ("max", "high", "default", "low", "min")
+    """
+    if not payload or not isinstance(payload, dict):
+        return "default"
+    
+    # Check for numeric priority (ntfy uses 1-5 scale: 5=max, 4=high, 3=default, 2=low, 1=min)
+    priority_value = payload.get("priority")
+    if priority_value is not None:
+        try:
+            p = int(priority_value)
+            if p >= 5:
+                return "max"
+            elif p >= 4:
+                return "high"
+            elif p >= 3:
+                return "default"
+            elif p >= 2:
+                return "low"
+            else:
+                return "min"
+        except (ValueError, TypeError):
+            pass
+    
+    # Check for string priority values (e.g., from headers or explicit field)
+    priority_str = payload.get("priority_str", payload.get("priority_level", "")).lower()
+    if priority_str:
+        if priority_str in ["5", "urgent", "critical", "max", "emergency"]:
+            return "max"
+        elif priority_str in ["4", "high"]:
+            return "high"
+        elif priority_str in ["3", "normal", "default", "medium"]:
+            return "default"
+        elif priority_str in ["2", "low"]:
+            return "low"
+        elif priority_str in ["1", "min", "minimal"]:
+            return "min"
+    
+    return "default"
+
+
+def get_priority_symbol(priority_level):
+    """Get the alert symbol(s) and count for priority level.
+    
+    Returns: (symbol, count) tuple - symbol is emoji, count is repetitions
+    """
+    symbols = {
+        "max": ("⚡", 3),      # 3 lightning bolts for max
+        "high": ("⚡", 2),     # 2 lightning bolts for high
+        "default": ("⚡", 1),  # 1 lightning bolt for default
+        "low": ("↓", 1),       # Down arrow for low
+        "min": ("•", 1),       # Bullet for minimal
+    }
+    return symbols.get(priority_level, ("⚡", 1))
+
+
+def draw_priority_banner(draw, x, y, width, height, priority, font, text_color=(0, 0, 0), bg_color=(200, 200, 200)):
+    """Draw a priority banner with visual styling based on priority level.
+    
+    Args:
+        draw: PIL ImageDraw object
+        x, y: Top-left coordinates
+        width, height: Banner dimensions
+        priority: One of "critical", "high", "medium", "low"
+        font: PIL Font for text
+        text_color: RGB tuple for text
+        bg_color: RGB tuple for background
+    
+    Returns: Text to display in banner
+    """
+    # Define visual styles per priority
+    styles = {
+        "critical": {
+            "text": "⚠ CRITICAL ⚠",
+            "fill": (255, 100, 100),  # Red
+            "pattern": "heavy",  # Dense shading
+        },
+        "high": {
+            "text": "● HIGH ●",
+            "fill": (255, 180, 100),  # Orange
+            "pattern": "medium",
+        },
+        "medium": {
+            "text": "○ MEDIUM ○",
+            "fill": (255, 255, 100),  # Yellow
+            "pattern": "light",
+        },
+        "low": {
+            "text": "- LOW -",
+            "fill": (200, 255, 200),  # Light green
+            "pattern": "minimal",
+        },
+    }
+    
+    style = styles.get(priority.lower(), styles["medium"])
+    fill = style["fill"]
+    banner_text = style["text"]
+    pattern = style["pattern"]
+    
+    # Draw background rectangle with border
+    border_width = 2
+    draw.rectangle([x, y, x + width - 1, y + height - 1], fill=fill, outline=(0, 0, 0), width=border_width)
+    
+    # Add pattern/shading based on priority (thicker line = higher priority)
+    if pattern == "heavy":
+        # Dense lines for critical
+        for line_y in range(y + 5, y + height - 5, 2):
+            draw.line([x + 5, line_y, x + width - 5, line_y], fill=(100, 0, 0), width=1)
+    elif pattern == "medium":
+        # Medium spacing for high
+        for line_y in range(y + 5, y + height - 5, 3):
+            draw.line([x + 5, line_y, x + width - 5, line_y], fill=(150, 80, 0), width=1)
+    elif pattern == "light":
+        # Light spacing for medium
+        for line_y in range(y + 5, y + height - 5, 5):
+            draw.line([x + 5, line_y, x + width - 5, line_y], fill=(150, 150, 0), width=1)
+    
+    # Draw text centered in banner
+    text_bbox = draw.textbbox((0, 0), banner_text, font=font)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+    text_x = x + (width - text_width) // 2
+    text_y = y + (height - text_height) // 2
+    draw.text((text_x, text_y), banner_text, font=font, fill=(0, 0, 0))
+    
+    return banner_text
+
+# Image processing controls for printer compatibility
+IMAGE_IMPL = os.environ.get("IMAGE_IMPL", "bitImageColumn")
+IMAGE_IMPLS = os.environ.get("IMAGE_IMPLS")
+IMAGE_SCALE = int(os.environ.get("IMAGE_SCALE", "2"))
+IMAGE_CONTRAST = float(os.environ.get("IMAGE_CONTRAST", "2.0"))
+# global stop event used to exit loops cleanly
+STOP_EVENT = threading.Event()
+MONITOR = None
+
+class WhiteboardPrinter:
+    def __init__(self, preview_mode=False):
+        self.p = None
+        self._paused = False
+        self.preview_mode = preview_mode
+        self.preview_count = 0
+        if not preview_mode:
+            self.connect()
+
+    def set_paused(self, paused: bool):
+        self._paused = bool(paused)
+
+    @property
+    def is_paused(self):
+        return self._paused
+
+    def connect(self):
+        if self.preview_mode:
+            print("📸 Preview mode - no printer connection needed")
+            return
+        
+        try:
+            if PRINTER_PROFILE:
+                self.p = Usb(VENDOR_ID, PRODUCT_ID, 0, profile=PRINTER_PROFILE)
+            else:
+                self.p = Usb(VENDOR_ID, PRODUCT_ID, 0)
+            # detach kernel driver if active
+            try:
+                if self.p.device.is_kernel_driver_active(0):
+                    self.p.device.detach_kernel_driver(0)
+            except Exception:
+                # device/kernel driver info may not be available on some platforms
+                logging.debug("Could not check/detach kernel driver")
+            # Give USB device time to settle after connection
+            time.sleep(0.5)
+            print("🟢 Hardware Linked")
+        except Exception:
+            logging.exception("Failed to connect to USB printer")
+            self.p = None
+
+    def create_layout(self, message, subtext=None, priority="default", payload=None):
+        """Create layout with ntfy fields: tags/priority (header), title, divider, message, QR if click present."""
+        # Compute width from paper size and printer DPI, with safe margins
+        full_width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
+        safe_margin_px = int(round(SAFE_MARGIN_MM / 25.4 * PRINTER_DPI))
+        width = full_width - (2 * safe_margin_px)  # Subtract margins from usable width
+        x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
+        y_offset_px = int(round(Y_OFFSET_MM / 25.4 * PRINTER_DPI))
+        left_margin = safe_margin_px + x_offset_px  # Left edge accounting for offset
+
+        # MASSIVE font sizes (swapped: title large, message medium)
+        font_main_size = 40      # Message size
+        font_sub_size = 35
+        font_title_size = 70     # Title size (also used for emoji header)
+        font_subtext_size = 24
+
+        try:
+            font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_title_size)
+            font_message = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_main_size)
+            font_reg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_sub_size)
+            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_title_size)
+            font_subtext = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_subtext_size)
+        except Exception:
+            logging.warning("Could not load TTF fonts; falling back to default font")
+            font_bold = font_message = font_reg = font_title = font_subtext = ImageFont.load_default()
+
+        # Extract fields from ntfy payload
+        payload = payload or {}
+        tags = payload.get("tags", "")  # comma-separated string or list
+        title = payload.get("title", "")
+        click_url = payload.get("click", "")  # URL for QR code
+
+        # Parse tags (can be comma-separated string or list)
+        if isinstance(tags, str):
+            tags_list = [t.strip() for t in tags.split(",") if t.strip()]
+        else:
+            tags_list = tags if isinstance(tags, list) else []
+
+        # Convert tag names to emoji using mapping
+        translated_tags = []
+        for tag in tags_list:
+            # Check if tag is a name in EMOJI_TAG_MAP
+            if tag in EMOJI_TAG_MAP:
+                translated_tags.append(EMOJI_TAG_MAP[tag])
+            else:
+                # Otherwise use tag as-is (might already be emoji)
+                translated_tags.append(tag)
+
+        # Header: tags OR priority icon (keep current logic if no tags)
+        if translated_tags:
+            header_text = " | ".join(translated_tags)
+        else:
+            # Fall back to priority symbol if no tags
+            symbol, count = get_priority_symbol(priority)
+            header_text = symbol * count
+
+        # Enforce message caps to avoid unbounded image sizes
+        if len(message) > MAX_MESSAGE_LENGTH:
+            message = message[:MAX_MESSAGE_LENGTH-3] + "..."
+
+        # Wrap main message (large centered text)
+        wrapped = textwrap.wrap(message, width=10)
+        lines = wrapped[:MAX_LINES]
+        if len(wrapped) > MAX_LINES and lines:
+            lines[-1] = (lines[-1][:max(0, len(lines[-1]) - 3)] + "...")
+
+        # Measure text sizes to build a tight canvas
+        sample_main_bbox = font_bold.getbbox("Ag")
+        main_line_height = sample_main_bbox[3] - sample_main_bbox[1]
+        sample_sub_bbox = font_reg.getbbox("Ag")
+        sub_line_height = sample_sub_bbox[3] - sample_sub_bbox[1]
+        sample_title_bbox = font_title.getbbox("Ag")
+        title_line_height = sample_title_bbox[3] - sample_title_bbox[1]
+        sample_subtext_bbox = font_subtext.getbbox("Ag")
+        subtext_line_height = sample_subtext_bbox[3] - sample_subtext_bbox[1]
+
+        top_pad = 20
+        header_gap = 80      # More spacing for large 70px emoji
+        title_gap = 15
+        line_gap = 10
+        divider_gap = 15
+        date_gap = 25
+        subtext_gap = 10
+        bottom_pad = 20
+
+        # Calculate header height
+        header_bbox = font_bold.getbbox(header_text)
+        header_height = header_bbox[3] - header_bbox[1]
+
+        # Calculate title height
+        title_height = 0
+        if title:
+            title_wrapped = textwrap.wrap(title, width=12)
+            title_height = (len(title_wrapped) * title_line_height) + (max(0, len(title_wrapped) - 1) * line_gap)
+
+        # Main message height
+        lines_height = (len(lines) * main_line_height) + (max(0, len(lines) - 1) * line_gap)
+
+        # QR code height (if click URL present)
+        qr_height = 0
+        qr_img = None
+        if click_url:
+            qr_size = 100
+            qr_height = qr_size + subtext_gap
+            try:
+                qr = qrcode.QRCode(version=1, box_size=3, border=1)
+                qr.add_data(click_url)
+                qr.make()
+                qr_img = qr.make_image(fill_color="black", back_color="white")
+                qr_img = qr_img.resize((qr_size, qr_size), Image.NEAREST)
+            except Exception as e:
+                logging.warning("QR generation failed: %s", e)
+                qr_height = 0
+
+        # Calculate total height
+        total_height = (
+            top_pad +
+            header_height + header_gap +
+            (title_height + title_gap if title else 0) +
+            lines_height +
+            divider_gap + 3 + date_gap +
+            sub_line_height + 5 +  # date
+            sub_line_height +  # time
+            qr_height +
+            bottom_pad
+        )
+
+        canvas = Image.new('RGB', (full_width, total_height), color=(255, 255, 255))
+        draw = ImageDraw.Draw(canvas)
+
+        y = top_pad + y_offset_px
+
+        # 1. Header (tags or priority symbol)
+        # For emoji, center by estimating character width (each emoji ~50px at size 70)
+        char_width = font_title_size * 0.55  # ~55% of font size per emoji
+        estimated_width = len(header_text) * char_width
+        header_x = int(left_margin + (width - estimated_width) / 2)
+        # Use Pilmoji to render emoji in tags
+        with Pilmoji(canvas) as pilmoji:
+            pilmoji.text((header_x, y), header_text, (0, 0, 0), font_bold)
+        y += header_height + header_gap
+
+        # 2. Title (if present)
+        if title:
+            title_wrapped = textwrap.wrap(title, width=12)
+            for title_line in title_wrapped:
+                title_bbox = draw.textbbox((0, 0), title_line, font=font_title)
+                title_x = (width - (title_bbox[2] - title_bbox[0])) // 2 + left_margin
+                draw.text((title_x, y), title_line, font=font_title, fill=(0, 0, 0))
+                y += title_line_height + line_gap
+            
+            # Divider line after title
+            y += title_gap
+            draw.line([left_margin + 20, y, left_margin + width - 20, y], fill=(0, 0, 0), width=3)
+            y += divider_gap
+
+        # 3. Main message text (centered, large)
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font_message)
+            draw.text(((width - (bbox[2]-bbox[0]))//2 + left_margin, y), line, font=font_message, fill=(0, 0, 0))
+            y += main_line_height + line_gap
+
+        # 4. Divider line
+        y += divider_gap
+        draw.line([left_margin + 20, y, left_margin + width - 20, y], fill=(0, 0, 0), width=3)
+        y += date_gap
+
+        # 5. Date/Time (centered, smaller)
+        date_str = time.strftime("%b %d, %Y")
+        time_str = time.strftime("%H:%M:%S")
+        bbox = draw.textbbox((0, 0), date_str, font=font_reg)
+        draw.text(((width - (bbox[2]-bbox[0]))//2 + left_margin, y), date_str, font=font_reg, fill=(0, 0, 0))
+        y += sub_line_height + 5
+        bbox_time = draw.textbbox((0, 0), time_str, font=font_reg)
+        draw.text(((width - (bbox_time[2]-bbox_time[0]))//2 + left_margin, y), time_str, font=font_reg, fill=(0, 0, 0))
+        y += sub_line_height
+
+        # 6. QR code (if click URL present, centered at bottom)
+        if qr_img:
+            y += subtext_gap
+            qr_x = (width - qr_img.width) // 2 + left_margin
+            canvas.paste(qr_img, (qr_x, y))
+            y += qr_img.height
+
+        y += bottom_pad
+        return canvas
+
+    def render_structured(self, payload):
+        """Render structured JSON payloads (e.g., monday.com tasks)."""
+        msg_type = payload.get("type", "generic")
+        
+        if msg_type == "monday_task":
+            return self._render_monday_task(payload)
+        elif msg_type == "text_with_subtext":
+            message = payload.get("message", "Message")
+            subtext = payload.get("subtext")
+            return self.create_layout(strip_emojis(message), subtext=subtext)
+        elif msg_type == "priority_alert":
+            return self._render_priority_alert(payload)
+        else:
+            # Generic fallback
+            return self.create_layout(json.dumps(payload))
+    
+    def _render_monday_task(self, payload):
+        """Kanban card style layout (monochrome) with borders and priority indicator."""
+        full_width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
+        safe_margin_px = int(round(SAFE_MARGIN_MM / 25.4 * PRINTER_DPI))
+        x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
+        y_offset_px = int(round(Y_OFFSET_MM / 25.4 * PRINTER_DPI))
+        left_margin = safe_margin_px + x_offset_px
+        
+        try:
+            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+            font_meta = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
+        except Exception:
+            font_title = font_meta = font_small = ImageFont.load_default()
+        
+        # Extract fields
+        task_name = payload.get("task", "Task").strip()[:50]
+        priority = payload.get("priority", "medium").lower()
+        status = payload.get("status", "todo").lower()
+        assignee = payload.get("assignee", "").upper()[:3]
+        due_date = payload.get("due_date", "")[:10]
+        ref_id = payload.get("id", payload.get("ref_id", ""))
+        qr_data = payload.get("qr_url") or payload.get("url")
+        
+        # Priority indicator width (monochrome: thicker = higher priority)
+        priority_widths = {
+            "critical": 8,
+            "high": 6,
+            "medium": 4,
+            "low": 2,
+        }
+        priority_width = priority_widths.get(priority, 3)
+        
+        # Calculate dimensions with safe margins
+        qr_size = 80 if qr_data else 0
+        card_height = 220 + qr_size
+        card_width = full_width - (2 * safe_margin_px)
+        padding = 15
+        card_x = left_margin
+        card_y = 10 + y_offset_px
+        
+        canvas = Image.new('RGB', (full_width, card_height), color=(255, 255, 255))
+        draw = ImageDraw.Draw(canvas)
+        
+        # Card border/frame (black)
+        draw.rectangle(
+            [card_x, card_y, card_x + card_width, card_y + card_height - 15],
+            outline=(0, 0, 0),
+            width=2
+        )
+        
+        # Priority indicator bar (left side, varying thickness based on priority)
+        draw.rectangle(
+            [card_x, card_y, card_x + priority_width, card_y + card_height - 15],
+            fill=(0, 0, 0),
+            outline=(0, 0, 0)
+        )
+        
+        # Content area
+        y = card_y + padding
+        content_x = card_x + padding + 5 + 5
+        
+        # Task title (wrapped, bold)
+        lines = textwrap.wrap(task_name, width=18)
+        for line in lines[:2]:
+            draw.text((content_x, y), line, font=font_title, fill=(0, 0, 0))
+            y += 32
+        
+        y += 8
+        
+        # Status badge / icon
+        status_icon = ICON_STATUS.get(status, "[?]")
+        priority_icon = ICON_PRIORITY.get(priority, "[!]")
+        draw.text((content_x, y), f"{status_icon} {priority_icon}", font=font_meta, fill=(0, 0, 0))
+        y += 24
+        
+        # Metadata row: assignee and due date
+        meta_parts = []
+        if assignee:
+            meta_parts.append(f"@{assignee}")
+        if due_date:
+            meta_parts.append(f"{due_date}")
+        
+        if meta_parts:
+            meta_text = "  |  ".join(meta_parts)
+            draw.text((content_x, y), meta_text, font=font_small, fill=(0, 0, 0))
+            y += 20
+        
+        # Reference ID
+        if ref_id:
+            draw.text((content_x, y), f"#{ref_id}", font=font_small, fill=(0, 0, 0))
+            y += 18
+        
+        # QR code (bottom right corner of card)
+        if qr_data:
+            try:
+                qr = qrcode.QRCode(version=1, box_size=3, border=1)
+                qr.add_data(qr_data)
+                qr.make()
+                qr_img = qr.make_image(fill_color="black", back_color="white")
+                qr_resized = qr_img.resize((70, 70), Image.NEAREST)
+                qr_x = card_x + card_width - 75
+                qr_y = card_y + card_height - 85
+                canvas.paste(qr_resized, (qr_x, qr_y))
+            except Exception as e:
+                logging.warning("QR generation failed: %s", e)
+        
+        return canvas
+
+    def _render_priority_alert(self, payload):
+        """Render a priority-based alert with visual banner and optional subtext."""
+        full_width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
+        safe_margin_px = int(round(SAFE_MARGIN_MM / 25.4 * PRINTER_DPI))
+        x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
+        y_offset_px = int(round(Y_OFFSET_MM / 25.4 * PRINTER_DPI))
+        left_margin = safe_margin_px + x_offset_px
+        
+        try:
+            font_banner = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+            font_subtext = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+        except Exception:
+            font_banner = font_subtext = ImageFont.load_default()
+        
+        priority = payload.get("priority", "medium").lower()
+        message = payload.get("message", "Alert")
+        subtext = payload.get("subtext", "")
+        
+        width = full_width - (2 * safe_margin_px)
+        banner_height = 80
+        padding = 15
+        
+        # Calculate total height
+        total_height = banner_height + padding + padding
+        if subtext:
+            subtext_bbox = ImageFont.load_default().getbbox("Ag")
+            subtext_height = (subtext_bbox[3] - subtext_bbox[1]) + padding
+            total_height += subtext_height
+        
+        canvas = Image.new('RGB', (full_width, total_height), color=(255, 255, 255))
+        draw = ImageDraw.Draw(canvas)
+        
+        # Draw priority banner
+        banner_x = left_margin
+        banner_y = padding + y_offset_px
+        draw_priority_banner(draw, banner_x, banner_y, width, banner_height, priority, font_banner)
+        
+        # Draw subtext if provided
+        if subtext:
+            subtext_y = banner_y + banner_height + padding
+            subtext_bbox = draw.textbbox((0, 0), subtext, font=font_subtext)
+            subtext_x = left_margin + (width - (subtext_bbox[2] - subtext_bbox[0])) // 2
+            draw.text((subtext_x, subtext_y), strip_emojis(subtext), font=font_subtext, fill=(80, 80, 80))
+        
+        return canvas
+
+    def create_alignment_test(self):
+        # Build a simple alignment test using the same layout as regular messages
+        width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
+        height = int(round(width * 1.2))
+        x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
+
+        canvas = Image.new('RGB', (width, height), color=(255, 255, 255))
+        draw = ImageDraw.Draw(canvas)
+
+        # Border
+        draw.rectangle([0, 0, width - 1, height - 1], outline=(0, 0, 0), width=2)
+
+        # Center line (vertical) - apply offset
+        cx = width // 2 + x_offset_px
+        draw.line([cx, 0, cx, height], fill=(0, 0, 0), width=3)
+
+        # Tick marks every 10 mm
+        mm_to_px = PRINTER_DPI / 25.4
+        for mm in range(0, int(PAPER_WIDTH_MM) + 1, 10):
+            x = int(round(mm * mm_to_px)) + x_offset_px
+            draw.line([x, 0, x, 15], fill=(0, 0, 0), width=1)
+            draw.line([x, height - 15, x, height], fill=(0, 0, 0), width=1)
+
+        # Simple text label
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+        except Exception:
+            font = ImageFont.load_default()
+        
+        label1 = f"X_OFFSET_MM={X_OFFSET_MM}"
+        label2 = f"Center at {PAPER_WIDTH_MM/2}mm"
+        bbox1 = draw.textbbox((0, 0), label1, font=font)
+        bbox2 = draw.textbbox((0, 0), label2, font=font)
+        draw.text(((width - (bbox1[2]-bbox1[0]))//2, height//2 - 30), label1, font=font, fill=(0, 0, 0))
+        draw.text(((width - (bbox2[2]-bbox2[0]))//2, height//2 + 10), label2, font=font, fill=(0, 0, 0))
+
+        return canvas
+
+    def print_msg(self, message, subtext=None, payload=None):
+        if self.is_paused:
+            logging.warning("Printer paused due to high memory — dropping message")
+            return
+        if not self.p:
+            self.connect()
+        
+        # Detect if message is JSON (structured payload)
+        try:
+            msg_payload = json.loads(message)
+            if isinstance(msg_payload, dict) and "type" in msg_payload:
+                # Structured payload — use template (filter emojis from task names)
+                if "task" in msg_payload:
+                    msg_payload["task"] = strip_emojis(msg_payload["task"])
+                img = self.render_structured(msg_payload)
+            else:
+                # Fallback to plain text layout with optional subtext
+                # Detect priority from payload (ntfy priority data)
+                priority = detect_priority(message, payload or msg_payload)
+                img = self.create_layout(strip_emojis(message), subtext=subtext, priority=priority, payload=payload or msg_payload)
+        except (json.JSONDecodeError, ValueError):
+            # Plain text message - strip emojis, with optional subtext
+            # Detect priority from ntfy payload (if provided)
+            priority = detect_priority(message, payload)
+            img = self.create_layout(strip_emojis(message), subtext=subtext, priority=priority, payload=payload)
+        
+        # Preview mode - show image instead of printing
+        if self.preview_mode:
+            scale = max(1, IMAGE_SCALE)
+            scaled_width = img.width * scale
+            scaled_height = img.height * scale
+            img_scaled = img.resize((scaled_width, scaled_height), Image.NEAREST)
+            img_mono = img_scaled.convert("L")
+            img_mono = ImageOps.autocontrast(img_mono)
+            img_mono = ImageEnhance.Contrast(img_mono).enhance(IMAGE_CONTRAST)
+            img_final = img_mono.convert("1")
+            
+            self.preview_count += 1
+            timestamp = time.strftime("%H:%M:%S")
+            print(f"\n[{timestamp}] Preview #{self.preview_count}: {message[:60]}{'...' if len(message) > 60 else ''}")
+            print(f"   Resolution: {img_final.width}x{img_final.height}px")
+            print(f"   Paper: {PAPER_WIDTH_MM}mm ({PAPER_WIDTH_PX}px @ {PRINTER_DPI} DPI)")
+            print(f"   Printable: {PAPER_WIDTH_MM - 2*SAFE_MARGIN_MM}mm ({MAX_PRINTABLE_WIDTH_PX}px)")
+            img_final.show()
+            return
+        
+        # Retry logic for USB operations (handles transient device errors)
+        max_retries = 3
+        retry_delay = 1.0
+        
+        for attempt in range(max_retries):
+            try:
+                if not self.p:
+                    # No printer available; log and skip printing instead of crashing
+                    logging.warning("No printer connected — skipping print: %s", message)
+                    return
+                self.p.hw("INIT")
+                # Scale and convert to printer-friendly monochrome image
+                scale = max(1, IMAGE_SCALE)
+                scaled_width = img.width * scale
+                scaled_height = img.height * scale
+                img_scaled = img.resize((scaled_width, scaled_height), Image.NEAREST)
+                img_mono = img_scaled.convert("L")
+                img_mono = ImageOps.autocontrast(img_mono)
+                img_mono = ImageEnhance.Contrast(img_mono).enhance(IMAGE_CONTRAST)
+                img_mono = img_mono.convert("1")
+                # Select implementation list
+                if IMAGE_IMPLS:
+                    impls = [i.strip() for i in IMAGE_IMPLS.split(',') if i.strip()]
+                else:
+                    impls = [IMAGE_IMPL]
+
+                printed = False
+                for impl in impls:
+                    try:
+                        self.p.image(img_mono, impl=impl)
+                        printed = True
+                        break
+                    except TypeError:
+                        # Fallback for older escpos versions
+                        self.p.image(img_mono)
+                        printed = True
+                        break
+                    except Exception:
+                        logging.exception("Image print failed with impl=%s", impl)
+
+                if not printed:
+                    logging.error("All image implementations failed. Try IMAGE_IMPLS=bitImageColumn,bitImageRaster,graphics,raster or set PRINTER_PROFILE.")
+                self.p.text("\n\n\n\n")
+                self.p.cut()
+                print(f"✅ Printed: {message[:50]}")
+                break  # Success - exit retry loop
+            except Exception as e:
+                # Check if it's a USB error that might be transient
+                is_usb_error = "USBError" in str(type(e).__name__) or "Entity not found" in str(e) or "No such device" in str(e)
+                
+                if is_usb_error and attempt < max_retries - 1:
+                    logging.warning("USB error on attempt %d/%d: %s - retrying after %.1fs", attempt + 1, max_retries, e, retry_delay)
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    # Try reconnecting
+                    self.connect()
+                    continue
+                else:
+                    logging.exception("Printing error (attempt %d/%d)", attempt + 1, max_retries)
+                    # Final attempt failed - reconnect for next message
+                    self.connect()
+                    break
+        
+        # Cleanup images after all retry attempts
+        if 'img' in locals():
+            try:
+                del img
+            except Exception:
+                pass
+        if 'img_scaled' in locals():
+            try:
+                del img_scaled
+            except Exception:
+                pass
+        if 'img_mono' in locals():
+            try:
+                del img_mono
+            except Exception:
+                pass
+        gc.collect()
+
+def listen(ntfy_url, preview_mode=False):
+    global MONITOR
+    wp = WhiteboardPrinter(preview_mode=preview_mode)
+    
+    mode_str = "preview mode" if preview_mode else "printer mode"
+    print(f"👀 Listening to {ntfy_url} ({mode_str})")
+    if preview_mode:
+        print(f"📸 Previews will open automatically for each message")
+    print(f"   Press Ctrl+C to stop\n")
+    
+    logging.info("Listening to %s", ntfy_url)
+    # Start memory monitor (skip in preview mode)
+    if not preview_mode:
+        MONITOR = MemoryMonitor(wp)
+        MONITOR.start()
+    while not STOP_EVENT.is_set():
+        try:
+            # use context manager to ensure response is closed
+            with requests.get(ntfy_url, stream=True, timeout=None) as r:
+                r.raise_for_status()
+                for line in r.iter_lines(decode_unicode=True):
+                    if STOP_EVENT.is_set():
+                        break
+                    if line:
+                        try:
+                            payload = json.loads(line)
+                        except Exception:
+                            logging.warning("Received non-json line: %s", line)
+                            continue
+                        msg = payload.get("message", "")
+                        if msg:
+                            # enforce a local truncation/caps before printing
+                            if len(msg) > MAX_MESSAGE_LENGTH:
+                                msg = msg[:MAX_MESSAGE_LENGTH-3] + "..."
+                            # Extract priority from ntfy payload (numeric 1-5 scale)
+                            wp.print_msg(msg, payload=payload)
+        except Exception:
+            if STOP_EVENT.is_set():
+                break
+            logging.exception("Connection to ntfy failed — retrying in 5s")
+            time.sleep(5)
+    # stop monitor on exit
+    try:
+        if MONITOR:
+            MONITOR.stop()
+            MONITOR.join(timeout=2.0)
+    except Exception:
+        logging.debug("Error stopping monitor")
+
+
+class MemoryMonitor(threading.Thread):
+    """Background thread checking memory usage and pausing printing when high.
+
+    If memory usage rises above MEM_THRESHOLD_PERCENT, printing is paused until
+    usage drops below MEM_RESUME_PERCENT.
+    """
+    def __init__(self, printer: WhiteboardPrinter, interval: float = 5.0):
+        super().__init__(daemon=True)
+        self.printer = printer
+        self.interval = interval
+        self._stop_event = threading.Event()
+
+    def run(self):
+        while not self._stop_event.is_set():
+            try:
+                used_percent = self._get_mem_percent()
+                if used_percent is None:
+                    # Unable to determine memory usage; skip
+                    time.sleep(self.interval)
+                    continue
+                if used_percent >= MEM_THRESHOLD_PERCENT and not self.printer.is_paused:
+                    logging.warning("Memory usage high (%.1f%%) — pausing printer", used_percent)
+                    self.printer.set_paused(True)
+                elif used_percent <= MEM_RESUME_PERCENT and self.printer.is_paused:
+                    logging.info("Memory usage normal (%.1f%%) — resuming printer", used_percent)
+                    self.printer.set_paused(False)
+            except Exception:
+                logging.exception("Memory monitor error")
+            time.sleep(self.interval)
+
+    def stop(self):
+        self._stop_event.set()
+
+    def _get_mem_percent(self):
+        try:
+            if psutil:
+                return psutil.virtual_memory().percent
+            # fallback: read /proc/meminfo
+            with open('/proc/meminfo', 'r') as f:
+                info = f.read()
+            mem_total = None
+            mem_available = None
+            for line in info.splitlines():
+                if line.startswith('MemTotal:'):
+                    mem_total = int(line.split()[1])
+                elif line.startswith('MemAvailable:'):
+                    mem_available = int(line.split()[1])
+            if mem_total and mem_available:
+                used = mem_total - mem_available
+                return used / mem_total * 100.0
+        except Exception:
+            logging.exception("Failed to read memory usage")
+        return None
+
+
+def shutdown(signum, frame):
+    logging.info("Shutting down (signal %s)", signum)
+    # signal listen loop and monitor to stop
+    try:
+        STOP_EVENT.set()
+        if MONITOR:
+            MONITOR.stop()
+            MONITOR.join(timeout=2.0)
+    except Exception:
+        logging.debug("Error during shutdown cleanup")
+    sys.exit(0)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Receipt printer listening to an ntfy topic")
+    parser.add_argument("--host", default=DEFAULT_NTFY_HOST, help="ntfy host (including scheme)")
+    parser.add_argument("--topic", default=DEFAULT_NTFY_TOPIC, help="ntfy topic name")
+    parser.add_argument("--test-align", action="store_true", help="print alignment test and exit")
+    parser.add_argument("--preview", "-p", action="store_true", help="preview mode - show images instead of printing")
+    parser.add_argument("--example", "-e", choices=["text", "kanban"], help="show example message")
+    args = parser.parse_args()
+    
+    # Example mode
+    if args.example:
+        if args.example == "text":
+            message = "Lunch Time! 🍕🍔"
+            print(f"Example plain text: {message}")
+        elif args.example == "kanban":
+            message = json.dumps({
+                "type": "monday_task",
+                "task": "Design Homepage",
+                "priority": "high",
+                "status": "in_progress",
+                "assignee": "JD",
+                "due_date": "2026-02-15",
+                "id": "M123",
+                "qr_url": "https://monday.com/boards/123"
+            })
+            print(f"Example kanban card:\n{message}")
+        
+        wp = WhiteboardPrinter(preview_mode=True)
+        wp.print_msg(message)
+        sys.exit(0)
+
+    if args.test_align:
+        wp = WhiteboardPrinter()
+        img = wp.create_alignment_test()
+        # use the same print pipeline for calibration
+        wp.print_msg("ALIGNMENT TEST")
+        try:
+            # print test image directly
+            img_mono = img.convert("L")
+            img_mono = ImageOps.autocontrast(img_mono)
+            img_mono = ImageEnhance.Contrast(img_mono).enhance(IMAGE_CONTRAST)
+            img_mono = img_mono.convert("1")
+            if IMAGE_IMPLS:
+                impls = [i.strip() for i in IMAGE_IMPLS.split(',') if i.strip()]
+            else:
+                impls = [IMAGE_IMPL]
+            for impl in impls:
+                try:
+                    wp.p.image(img_mono, impl=impl)
+                    break
+                except TypeError:
+                    wp.p.image(img_mono)
+                    break
+        finally:
+            wp.p.text("\n\n\n\n")
+            wp.p.cut()
+        sys.exit(0)
+
+    if not args.host or not args.topic:
+        logging.error("NTFY host/topic not provided. Set NTFY_HOST and NTFY_TOPIC in environment or pass --host/--topic.")
+        logging.error("Copy .env.template to .env and fill in NTFY_HOST/NTFY_TOPIC before running.")
+        sys.exit(2)
+
+    ntfy_url = f"{args.host.rstrip('/')}/{args.topic}/json"
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    listen(ntfy_url, preview_mode=args.preview)
+
+
+if __name__ == "__main__":
+    main()

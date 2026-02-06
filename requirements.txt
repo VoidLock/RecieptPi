@@ -4,3 +4,5 @@ python-escpos
 pyusb
 psutil
 qrcode[pil]
+pilmoji
+python-dotenv

@@ -1,0 +1,147 @@
+"""ntfy stream listener and memory monitoring for receipt printer service."""
+
+import logging
+import time
+import json
+import threading
+import requests
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+from . import config
+from .printer import WhiteboardPrinter
+
+
+# Global monitor instance
+MONITOR = None
+
+
+def listen(ntfy_url, preview_mode=False):
+    """Connect to ntfy stream and print incoming messages.
+    
+    Args:
+        ntfy_url (str): Full ntfy SSE URL (e.g., https://ntfy.sh/mytopic/json)
+        preview_mode (bool): If True, display images instead of printing
+    """
+    global MONITOR
+    wp = WhiteboardPrinter(preview_mode=preview_mode)
+    
+    mode_str = "preview mode" if preview_mode else "printer mode"
+    print(f"👀 Listening to {ntfy_url} ({mode_str})")
+    if preview_mode:
+        print(f"📸 Previews will open automatically for each message")
+    print(f"   Press Ctrl+C to stop\n")
+    
+    logging.info("Listening to %s", ntfy_url)
+    
+    # Start memory monitor (skip in preview mode)
+    if not preview_mode:
+        MONITOR = MemoryMonitor(wp)
+        MONITOR.start()
+    
+    while not config.STOP_EVENT.is_set():
+        try:
+            with requests.get(ntfy_url, stream=True, timeout=None) as r:
+                r.raise_for_status()
+                for line in r.iter_lines(decode_unicode=True):
+                    if config.STOP_EVENT.is_set():
+                        break
+                    if line:
+                        try:
+                            payload = json.loads(line)
+                        except Exception:
+                            logging.warning("Received non-json line: %s", line)
+                            continue
+                        msg = payload.get("message", "")
+                        if msg:
+                            if len(msg) > config.MAX_MESSAGE_LENGTH:
+                                msg = msg[:config.MAX_MESSAGE_LENGTH-3] + "..."
+                            wp.print_msg(msg, payload=payload)
+        except Exception:
+            if config.STOP_EVENT.is_set():
+                break
+            logging.exception("Connection to ntfy failed — retrying in 5s")
+            time.sleep(5)
+    
+    # Stop monitor on exit
+    try:
+        if MONITOR:
+            MONITOR.stop()
+            MONITOR.join(timeout=2.0)
+    except Exception:
+        logging.debug("Error stopping monitor")
+
+
+class MemoryMonitor(threading.Thread):
+    """Background thread checking memory usage and pausing printing when high.
+
+    If memory usage rises above MEM_THRESHOLD_PERCENT, printing is paused until
+    usage drops below MEM_RESUME_PERCENT.
+    
+    Args:
+        printer (WhiteboardPrinter): Printer instance to pause/resume
+        interval (float): Check interval in seconds (default 5.0)
+    """
+    
+    def __init__(self, printer: WhiteboardPrinter, interval: float = 5.0):
+        super().__init__(daemon=True)
+        self.printer = printer
+        self.interval = interval
+        self._stop_event = threading.Event()
+
+    def run(self):
+        """Monitor loop - runs until stop() is called."""
+        while not self._stop_event.is_set():
+            try:
+                used_percent = self._get_mem_percent()
+                if used_percent is None:
+                    time.sleep(self.interval)
+                    continue
+                
+                if used_percent >= config.MEM_THRESHOLD_PERCENT and not self.printer.is_paused:
+                    logging.warning("Memory usage high (%.1f%%) — pausing printer", used_percent)
+                    self.printer.set_paused(True)
+                elif used_percent <= config.MEM_RESUME_PERCENT and self.printer.is_paused:
+                    logging.info("Memory usage normal (%.1f%%) — resuming printer", used_percent)
+                    self.printer.set_paused(False)
+            except Exception:
+                logging.exception("Memory monitor error")
+            
+            time.sleep(self.interval)
+
+    def stop(self):
+        """Stop the monitor thread."""
+        self._stop_event.set()
+
+    def _get_mem_percent(self):
+        """Get system memory usage percentage.
+        
+        Returns:
+            float: Memory usage percentage (0-100), or None if unavailable
+        """
+        try:
+            if psutil:
+                return psutil.virtual_memory().percent
+            
+            # Fallback: read /proc/meminfo
+            with open('/proc/meminfo', 'r') as f:
+                info = f.read()
+            
+            mem_total = None
+            mem_available = None
+            for line in info.splitlines():
+                if line.startswith('MemTotal:'):
+                    mem_total = int(line.split()[1])
+                elif line.startswith('MemAvailable:'):
+                    mem_available = int(line.split()[1])
+            
+            if mem_total and mem_available:
+                used = mem_total - mem_available
+                return used / mem_total * 100.0
+        except Exception:
+            logging.exception("Failed to read memory usage")
+        
+        return None
