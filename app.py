@@ -119,6 +119,66 @@ def strip_emojis(text):
     text = emoji_pattern.sub('', text)
     return text
 
+def detect_priority(message, payload=None):
+    """Detect priority level from message or payload.
+    
+    Returns: ("max", "high", "default", "low", "min")
+    - MAX: *** (critical/urgent keywords)
+    - High: ** (high priority keywords)
+    - Default: * (no keywords or unknown)
+    - Low: ↓ (low priority keywords)
+    - MIN: • (minimal/info only keywords)
+    """
+    # Check structured payload first
+    if payload and isinstance(payload, dict):
+        priority = payload.get("priority", "").lower()
+        if priority in ["critical", "max", "emergency"]:
+            return "max"
+        elif priority in ["high", "urgent"]:
+            return "high"
+        elif priority in ["medium", "default", "normal"]:
+            return "default"
+        elif priority in ["low"]:
+            return "low"
+        elif priority in ["min", "minimal", "info"]:
+            return "min"
+    
+    # Check message text for keywords (order matters - check specific before general)
+    msg_lower = message.lower()
+    
+    # Max priority keywords
+    if any(kw in msg_lower for kw in ["critical", "emergency", "urgent", "alert", "alarm"]):
+        return "max"
+    
+    # High priority keywords
+    if any(kw in msg_lower for kw in ["important", "action required", "attention"]):
+        return "high"
+    
+    # Min priority keywords (check before low since "info" overlaps)
+    if any(kw in msg_lower for kw in ["minimal", "optional", "nice to have"]):
+        return "min"
+    
+    # Low priority keywords
+    if any(kw in msg_lower for kw in ["low priority", "fyi", "low importance"]):
+        return "low"
+    
+    # Default if no keywords found
+    return "default"
+
+def get_priority_symbol(priority_level):
+    """Get the alert symbol(s) and count for priority level.
+    
+    Returns: (symbol, count)
+    """
+    symbols = {
+        "max": ("⚡", 3),      # ***
+        "high": ("⚡", 2),     # **
+        "default": ("⚡", 1),  # *
+        "low": ("↓", 1),       # Single downward arrow
+        "min": ("•", 1),       # Single bullet point
+    }
+    return symbols.get(priority_level, ("⚡", 1))
+
 def draw_priority_banner(draw, x, y, width, height, priority, font, text_color=(0, 0, 0), bg_color=(200, 200, 200)):
     """Draw a priority banner with visual styling based on priority level.
     
@@ -239,7 +299,7 @@ class WhiteboardPrinter:
             logging.exception("Failed to connect to USB printer")
             self.p = None
 
-    def create_layout(self, message, subtext=None):
+    def create_layout(self, message, subtext=None, priority="default"):
         # Compute width from paper size and printer DPI, with safe margins
         full_width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
         safe_margin_px = int(round(SAFE_MARGIN_MM / 25.4 * PRINTER_DPI))
@@ -287,8 +347,10 @@ class WhiteboardPrinter:
         subtext_gap = 10
         bottom_pad = 20
         
-        # Apply emoji filtering to alert symbol
-        alert_symbol = strip_emojis("🍆")
+        # Get priority-based alert symbol and count
+        symbol, count = get_priority_symbol(priority)
+        alert_symbol = symbol * count  # Repeat symbol based on priority
+        alert_symbol = strip_emojis(alert_symbol)
 
         lines_height = (len(lines) * main_line_height) + (max(0, len(lines) - 1) * line_gap)
         bolt_bbox = font_bold.getbbox(alert_symbol)
@@ -573,10 +635,14 @@ class WhiteboardPrinter:
                 img = self.render_structured(payload)
             else:
                 # Fallback to plain text layout with optional subtext
-                img = self.create_layout(strip_emojis(message), subtext=subtext)
+                # Detect priority from payload
+                priority = detect_priority(message, payload)
+                img = self.create_layout(strip_emojis(message), subtext=subtext, priority=priority)
         except (json.JSONDecodeError, ValueError):
             # Plain text message - strip emojis, with optional subtext
-            img = self.create_layout(strip_emojis(message), subtext=subtext)
+            # Detect priority from message text
+            priority = detect_priority(message)
+            img = self.create_layout(strip_emojis(message), subtext=subtext, priority=priority)
         
         # Preview mode - show image instead of printing
         if self.preview_mode:
