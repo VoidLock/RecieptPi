@@ -153,47 +153,39 @@ class WhiteboardPrinter:
         return canvas
 
     def create_alignment_test(self):
-        # Build a calibration grid to verify centering and scaling
+        # Build a simple alignment test using the same layout as regular messages
         width = int(round(PAPER_WIDTH_MM / 25.4 * PRINTER_DPI))
-        height = int(round(width * 1.6))
-        x_offset_px = int(round(X_OFFSET_MM / 25.4 * PRINTER_DPI))
-        y_offset_px = int(round(Y_OFFSET_MM / 25.4 * PRINTER_DPI))
-        logging.info("Alignment test: width=%d, x_offset_px=%d, y_offset_px=%d", width, x_offset_px, y_offset_px)
+        height = int(round(width * 1.2))
 
-        # Create a larger canvas to preserve offset through image processing
-        canvas_width = width + abs(x_offset_px) * 2
-        canvas = Image.new('RGB', (canvas_width, height), color=(255, 255, 255))
+        canvas = Image.new('RGB', (width, height), color=(255, 255, 255))
         draw = ImageDraw.Draw(canvas)
-        
-        # Adjust x_offset to account for the larger canvas
-        x_base = abs(x_offset_px)
-        y_base = abs(y_offset_px)
 
         # Border
-        draw.rectangle([x_base, y_base, x_base + width - 1, y_base + height - 1], outline=(0, 0, 0), width=1)
+        draw.rectangle([0, 0, width - 1, height - 1], outline=(0, 0, 0), width=2)
 
-        # Center lines
-        cx = width // 2 + x_base + x_offset_px
-        cy = height // 2 + y_base + y_offset_px
-        draw.line([cx, y_base, cx, y_base + height], fill=(0, 0, 0), width=2)
-        draw.line([x_base, cy, x_base + width, cy], fill=(0, 0, 0), width=2)
+        # Center line (vertical)
+        cx = width // 2
+        draw.line([cx, 0, cx, height], fill=(0, 0, 0), width=3)
 
-        # Tick marks every 10 mm along width
+        # Tick marks every 10 mm
         mm_to_px = PRINTER_DPI / 25.4
         for mm in range(0, int(PAPER_WIDTH_MM) + 1, 10):
-            x = int(round(mm * mm_to_px)) + x_base
-            draw.line([x, y_base, x, y_base + 20], fill=(0, 0, 0), width=1)
-            draw.line([x, y_base + height - 20, x, y_base + height], fill=(0, 0, 0), width=1)
+            x = int(round(mm * mm_to_px))
+            draw.line([x, 0, x, 15], fill=(0, 0, 0), width=1)
+            draw.line([x, height - 15, x, height], fill=(0, 0, 0), width=1)
 
-        # Labels
-        label = f"W={PAPER_WIDTH_MM}mm DPI={PRINTER_DPI} px={width}"
+        # Simple text label
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
         except Exception:
             font = ImageFont.load_default()
-        draw.text((x_base + 10, y_base + 10), "ALIGNMENT TEST", font=font, fill=(0, 0, 0))
-        draw.text((x_base + 10, y_base + 35), label, font=font, fill=(0, 0, 0))
-        draw.text((x_base + 10, y_base + 60), f"X_OFFSET_MM={X_OFFSET_MM}", font=font, fill=(0, 0, 0))
+        
+        label1 = f"X_OFFSET_MM={X_OFFSET_MM}"
+        label2 = f"Center at {PAPER_WIDTH_MM/2}mm"
+        bbox1 = draw.textbbox((0, 0), label1, font=font)
+        bbox2 = draw.textbbox((0, 0), label2, font=font)
+        draw.text(((width - (bbox1[2]-bbox1[0]))//2, height//2 - 30), label1, font=font, fill=(0, 0, 0))
+        draw.text(((width - (bbox2[2]-bbox2[0]))//2, height//2 + 10), label2, font=font, fill=(0, 0, 0))
 
         return canvas
 
