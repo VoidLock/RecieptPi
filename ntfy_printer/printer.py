@@ -105,6 +105,46 @@ class WhiteboardPrinter:
             logging.warning("Printer not ready - device may have been disconnected")
             return False
 
+    def _transform_phone_url(self, click_url, message):
+        """Transform phone numbers in click_url to tel: or sms: scheme based on message content.
+        
+        Args:
+            click_url (str): Potential phone number or URL
+            message (str): Message text to check for keywords
+            
+        Returns:
+            str: Transformed URL or original click_url if no transformation applies
+        """
+        # Feature disabled or no click_url
+        if not config.PHONE_QR_ENABLED or not click_url:
+            return click_url
+        
+        # Check if click_url is only digits (phone number)
+        if not click_url.replace("+", "").replace(" ", "").replace("-", "").isdigit():
+            return click_url
+        
+        # Extract only digits from phone number
+        phone_digits = ''.join(c for c in click_url if c.isdigit())
+        if not phone_digits:
+            return click_url
+        
+        # Check message for keywords (case-insensitive)
+        message_upper = message.upper()
+        
+        # Check for CALL keywords
+        for keyword in config.PHONE_CALL_KEYWORDS:
+            if keyword in message_upper:
+                # Format: tel:+{COUNTRY_CODE}{phone}
+                return f"tel:+{config.COUNTRY_CODE}{phone_digits}"
+        
+        # Check for TEXT keywords
+        for keyword in config.PHONE_TEXT_KEYWORDS:
+            if keyword in message_upper:
+                # Format: sms://{phone}
+                return f"sms://{phone_digits}"
+        
+        return click_url
+
     def create_layout(self, message, subtext=None, priority="default", payload=None):
         """Create layout with ntfy fields: tags/priority (header), title, divider, message, QR if click present.
         
@@ -212,8 +252,11 @@ class WhiteboardPrinter:
             qr_size = 100
             qr_height = qr_size + subtext_gap
             try:
+                # Transform phone numbers to tel: or sms: schemes if applicable
+                qr_data = self._transform_phone_url(click_url, message)
+                
                 qr = qrcode.QRCode(version=1, box_size=3, border=1)
-                qr.add_data(click_url)
+                qr.add_data(qr_data)
                 qr.make()
                 qr_img = qr.make_image(fill_color="black", back_color="white")
                 qr_img = qr_img.resize((qr_size, qr_size), Image.NEAREST)

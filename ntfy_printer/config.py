@@ -14,6 +14,12 @@ DEFAULT_NTFY_HOST = os.environ.get("NTFY_HOST")
 DEFAULT_NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
 ERROR_NTFY_TOPIC = os.environ.get("ERROR_NTFY_TOPIC")
 
+# --- Phone Number QR Code Configuration ---
+COUNTRY_CODE = os.environ.get("COUNTRY_CODE", "1")  # Default: US +1
+PHONE_QR_ENABLED = os.environ.get("PHONE_QR_ENABLED", "true").lower() == "true"
+PHONE_CALL_KEYWORDS = [k.strip().upper() for k in os.environ.get("PHONE_CALL_KEYWORDS", "call").split(",") if k.strip()]
+PHONE_TEXT_KEYWORDS = [k.strip().upper() for k in os.environ.get("PHONE_TEXT_KEYWORDS", "text,message").split(",") if k.strip()]
+
 # --- Logging Configuration ---
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 LOG_FILE = os.environ.get("LOG_FILE", "/var/log/receipt-printer.log")

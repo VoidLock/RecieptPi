@@ -44,7 +44,7 @@ Ensure the following are installed on your system:
 ```bash
 # For Debian/Ubuntu-based systems (e.g., DietPi):
 sudo apt update
-sudo apt install -y python3 python3-pip python3-venv git
+sudo apt install -y python3 python3-pip python3-venv git rsync
 ```
 
 ## Manual Execution (Temporary Run)
@@ -99,6 +99,12 @@ Configure the service parameters using an `.env` file.
 # Required - Messages TO print
 NTFY_HOST=https://ntfy.sh
 NTFY_TOPIC=my-receipt-printer
+
+# Phone Number QR Codes (optional - converts phone numbers to tel: or sms: schemes)
+COUNTRY_CODE=1                          # US: +1, UK: +44, etc.
+PHONE_QR_ENABLED=true
+PHONE_CALL_KEYWORDS=call                # Comma-separated keywords for tel: scheme
+PHONE_TEXT_KEYWORDS=text,message        # Comma-separated keywords for sms: scheme
 
 # Logging & Errors - Errors FROM the printer (separate topic!)
 LOG_LEVEL=INFO
@@ -238,7 +244,72 @@ sudo ./scripts/uninstall_service
 
 ## Advanced Features
 
-### Auto-Updates
+### Phone Number QR Codes
+
+Automatically convert phone numbers in click URLs to callable or text-able QR codes based on message keywords.
+
+**How it works:**
+1. Include a numeric `click` field in your ntfy message (phone number)
+2. Include a keyword in your message (CALL, TEXT, MESSAGE, etc.)
+3. QR code automatically encodes the proper scheme
+
+**Enable/Disable:**
+Set `PHONE_QR_ENABLED=true` or `PHONE_QR_ENABLED=false` in `.env`
+
+**Customize Keywords:**
+
+In `.env`, configure which keywords trigger CALL vs TEXT:
+
+```bash
+# Keywords that trigger tel: scheme (phone call)
+PHONE_CALL_KEYWORDS=call,dial,phone,reach
+
+# Keywords that trigger sms: scheme (text message)
+PHONE_TEXT_KEYWORDS=text,message,sms,contact
+```
+
+**Country Code:**
+
+Set your country code for international numbers:
+```bash
+COUNTRY_CODE=1        # US: +1
+COUNTRY_CODE=44       # UK: +44
+COUNTRY_CODE=33       # France: +33
+```
+
+**Example:**
+
+Send to ntfy with JSON payload:
+```bash
+curl -X POST https://ntfy.example.com/my-topic \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Support Available",
+    "message": "CALL our support team: +1 555-0123",
+    "click": "5550123"
+  }'
+```
+
+Result:
+- Message prints with "CALL" keyword detected
+- QR code encodes: `tel:+15550123`
+- Scanning the QR code initiates a phone call
+
+Or for SMS:
+```bash
+curl -X POST https://ntfy.example.com/my-topic \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Quick Survey",
+    "message": "TEXT your feedback: 555-4567",
+    "click": "5554567"
+  }'
+```
+
+Result:
+- Message prints with "TEXT" keyword detected
+- QR code encodes: `sms://5554567`
+- Scanning opens SMS compose with pre-filled number
 
 The service can automatically check for and install updates from the GitHub repository.
 
