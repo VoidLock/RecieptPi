@@ -12,14 +12,17 @@ This service was designed for:
 ## Features
 
 * **Prints ntfy messages** to ESC/POS USB thermal printers
+* **Auto-scaling messages** - content grows to fit the receipt, no truncation
 * **Preview mode** (no printer required) with image output
 * **Structured message support** (plain text, kanban cards, priority alerts)
-* **Calibration & alignment tools** for precise print placement
+* **Calibration tools** with readable grid for precise print placement
+* **Phone Number QR Codes** - Auto-converts phone numbers to tel: or sms: schemes based on message keywords
 * **Memory protection** with automatic pause/resume under high usage
-* **Error notifications** to a separate ntfy topic
+* **Error notifications** to a separate ntfy topic with human-readable format
 * **Auto-updates** via git with configurable polling interval
 * **Configurable logging** with file output for server mode
 * **Graceful shutdown** via `Q` (interactive) or system signals
+* **USB connection retry logic** - automatically recovers from transient USB errors
 
 ### Resource Usage
 
@@ -87,12 +90,29 @@ Configure the service parameters using an `.env` file.
     To find your printer's Vendor and Product IDs, use the `lsusb` command.
 
 **Optional Settings:**
+*   `PAPER_WIDTH_MM`: Paper width in millimeters (default: `80`)
+*   `X_OFFSET_MM`: Horizontal offset in mm - negative shifts left, positive shifts right (default: `0`)
+*   `Y_OFFSET_MM`: Vertical offset in mm (default: `0`)
+*   `SAFE_MARGIN_MM`: Margin from paper edge in mm (default: `4.0`)
+*   `MAX_HEIGHT_MM`: Maximum receipt height in mm, empty for unlimited
+*   `COUNTRY_CODE`: Country code for phone QR codes (default: `1` for US)
+*   `PHONE_QR_ENABLED`: Enable phone/SMS QR conversion (default: `true`)
+*   `PHONE_CALL_KEYWORDS`: Keywords that trigger tel: scheme (default: `call`)
+*   `PHONE_TEXT_KEYWORDS`: Keywords that trigger sms: scheme (default: `text,message`)
 *   `LOG_LEVEL`: Logging verbosity - `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (default: `INFO`)
 *   `LOG_FILE`: Log file path for server mode (default: `/var/log/receipt-printer.log`)
-*   `ERROR_NTFY_TOPIC`: **Separate** ntfy topic URL to send error notifications to (e.g., `https://ntfy.sh/my-printer-errors`). This should be different from your main `NTFY_TOPIC`.
+*   `ERROR_NTFY_TOPIC`: Separate ntfy topic for error notifications (e.g., `https://ntfy.sh/my-printer-errors`)
 *   `AUTO_UPDATE`: Enable automatic git-based updates - `true` or `false` (default: `false`)
 *   `UPDATE_CHECK_INTERVAL`: Seconds between update checks (default: `3600` = 1 hour)
 *   `GITHUB_REPO`: GitHub repository for updates (default: `VoidLock/RecieptPi`)
+*   `PRINTER_PROFILE`: Optional printer profile for python-escpos (e.g., `TM-T20`, `RP80`). Leave empty for generic ESC/POS.
+*   `MEM_THRESHOLD_PERCENT`: Memory usage threshold % to pause printing (default: `80`)
+*   `MEM_RESUME_PERCENT`: Memory usage % to resume printing (default: `70`)
+*   `MAX_MESSAGE_LENGTH`: Character limit for messages (default: `300`)
+*   `IMAGE_IMPL`: Image implementation (default: `bitImageColumn`)
+*   `IMAGE_IMPLS`: Comma-separated list of image implementations to try
+*   `IMAGE_SCALE`: Image scaling factor (default: `2`)
+*   `IMAGE_CONTRAST`: Image contrast enhancement (default: `2.0`)
 
 **Example `.env` file:**
 ```bash
@@ -141,7 +161,7 @@ Messages sent to the configured ntfy topic will now be printed.
 
 #### Command-Line Flags
 
-The `app.py` script supports the following command-line flags:
+The `app.py` script supports the following flags:
 
 ```bash
 usage: app.py [-h] [--host HOST] [--topic TOPIC] [--calibrate] [--test-align]
@@ -161,41 +181,46 @@ options:
   --server              server mode - run as systemd service with file logging
 ```
 
-### Flag Descriptions
+**Flag Details:**
 
-**Connection Flags:**
-*   `--host <URL>`: Specify the ntfy host URL (e.g., `https://ntfy.example.com`). Overrides `NTFY_HOST` from `.env`.
-*   `--topic <NAME>`: Specify the ntfy topic name. Overrides `NTFY_TOPIC` from `.env`.
+**Connection:**
+*   `--host <URL>`: Override NTFY_HOST from .env (e.g., `https://ntfy.example.com`)
+*   `--topic <NAME>`: Override NTFY_TOPIC from .env
 
-**Testing & Calibration Flags:**
-*   `--calibrate`: Prints a calibration grid to help determine the printable area and adjust printer settings. The script will output instructions for using the grid.
-*   `--test-align`: Prints an alignment test message and exits.
-*   `--preview`, `-p`: Runs in preview mode, displaying images in a window instead of sending them to the printer. Useful for testing without consuming thermal paper. Terminal will open image in any image viewer as a preview.
-*   `--example <TYPE>`, `-e <TYPE>`: Prints an example message of the specified type (`text` or `kanban`) and exits.
+**Testing & Calibration:**
+*   `--calibrate`: Print calibration grid with column letters (A-Z) and row numbers to verify print area
+*   `--test-align`: Print alignment test and exit
+*   `--preview`: Preview images in image viewer without printing (useful for testing)
+*   `--example <TYPE>`: Print example message (`text` or `kanban`) and exit
+
+**Service:**
+*   `--server`: Run in server mode for systemd service (uses LOG_FILE and LOG_LEVEL from .env)
 
 ### Calibrating the Print Bounding Box
 
-To optimize printing for your specific thermal printer and paper, you can use the built-in calibration feature:
+To optimize printing for your specific thermal printer and paper, use the built-in calibration feature:
 
-1.  **Run Calibration:** With your printer connected and the virtual environment active, execute the calibration command:
+1.  **Run Calibration:** With your printer connected and the virtual environment active, execute:
     ```bash
     python app.py --calibrate
     ```
-2.  **Inspect Printout:** The printer will output a calibration grid. Examine it carefully:
-    *   Note the rightmost column letter that is clearly visible.
-    *   Observe if the text is centered or shifted to one side.
-3.  **Adjust `.env` Variables:** Based on your observations, modify the following variables in your `.env` file:
-    *   `X_OFFSET_MM`: Adjusts the horizontal centering. Use negative values to shift left, positive to shift right.
-    *   `SAFE_MARGIN_MM`: Defines the margin from the paper's edge. Increase this if the right edge of your printout is cut off.
-    *   `MAX_HEIGHT_MM`: (Optional) Sets a maximum height for receipts in millimeters.
+2.  **Inspect Printout:** The printer outputs a calibration grid showing:
+    *   Column letters (A-Z) at 10mm intervals to check the rightmost visible letter
+    *   Row numbers (0mm-60mm) to verify vertical spacing
+    *   CENTER line (red) indicating the paper center
+    *   Current configuration settings at the bottom
+3.  **Adjust `.env` Variables:** Based on your observations, modify:
+    *   `X_OFFSET_MM`: Shifts content left (negative) or right (positive) for horizontal centering
+    *   `SAFE_MARGIN_MM`: Margin from paper edge - increase if right edge content is cut off
+    *   `MAX_HEIGHT_MM`: (Optional) Maximum receipt height in mm. Leave empty for unlimited.
 
-    *Example .env adjustments:*
-    ```
+    **Example adjustments:**
+    ```bash
     X_OFFSET_MM=2
     SAFE_MARGIN_MM=5
     # MAX_HEIGHT_MM=150
     ```
-    Repeat the calibration process until you are satisfied with the print alignment and bounding box.
+    Repeat calibration until satisfied with alignment.
 
 ## Systemd Service Installation (Permanent Run)
 
@@ -347,17 +372,24 @@ sudo systemctl restart receipt-printer
 
 Set `ERROR_NTFY_TOPIC` in `.env` to receive error notifications sent **to a separate topic** from your main print topic.
 
+**Error Format:**
+- **Title:** "Application Error on {{hostname}}"
+- **Tags:** 🚨 `rotating_light`, `error`
+- **Priority:** high
+- **Message:** Human-readable error details
+
 **Important:** Use a different topic than `NTFY_TOPIC`:
 - `NTFY_TOPIC` = Messages you send TO the printer (to print)
 - `ERROR_NTFY_TOPIC` = Error messages FROM the printer (for monitoring)
 
-You'll receive notifications when:
-- Printer connection fails
-- Print jobs fail
-- ntfy connection errors occur
-- Auto-updates fail
+**You'll receive notifications for:**
+- Printer connection failures
+- Print job failures
+- ntfy connection errors
+- Auto-update failures
+- USB device disconnections
 
-Example:
+**Example:**
 ```bash
 ERROR_NTFY_TOPIC=https://ntfy.sh/my-printer-errors
 ```
@@ -373,3 +405,61 @@ Control log verbosity with `LOG_LEVEL` in `.env`:
 Set log file location with `LOG_FILE` in `.env` (default: `/var/log/receipt-printer.log`).
 
 In server mode (`--server` flag), logs are written to the configured log file.
+## Troubleshooting
+
+### USB Printer Connection Issues
+
+**Problem:** "No such device (it may have been disconnected)" errors
+
+**Solution:** The printer connection has automatic retry logic (3 attempts with 1-second delays). If this persists:
+1. Unplug the printer and wait 5 seconds
+2. Plug it back in
+3. Run calibration again: `python app.py --calibrate`
+
+### Auto-Update Not Working
+
+**Problem:** "not a git repository" error in logs
+
+**Solution:** Reinstall using the install script:
+```bash
+sudo ./scripts/uninstall_service
+sudo ./scripts/install_service $(whoami)
+```
+
+The install script now preserves the `.git` directory needed for auto-updates.
+
+### Printer Not Found
+
+**Problem:** "Failed to connect to USB printer" on startup
+
+**Solution:** 
+1. Verify printer is connected: `lsusb | grep "0fe6"`
+2. Get your printer's vendor/product IDs: `lsusb -v | grep -E "idVendor|idProduct"`
+3. Update `PRINTER_VENDOR` and `PRINTER_PRODUCT` in `.env`
+4. Optionally set `PRINTER_PROFILE` if your printer model is listed
+
+### Images Printing Incorrectly
+
+**Problem:** Images too large, scaled incorrectly, or poor quality
+
+**Solution:** Adjust in `.env`:
+```bash
+# Try different image implementations
+IMAGE_IMPLS=bitImageColumn,bitImageRaster,graphics,raster
+
+# Reduce scaling if images are too large
+IMAGE_SCALE=1
+
+# Adjust contrast for better quality
+IMAGE_CONTRAST=1.5
+```
+
+### Service Won't Start
+
+**Problem:** `systemctl status receipt-printer` shows errors
+
+**Solution:**
+1. Check logs: `journalctl -u receipt-printer -n 50`
+2. Verify .env exists: `cat /opt/RecieptPi/.env`
+3. Check permissions: `sudo chown -R $USER:$USER /opt/RecieptPi`
+4. Restart: `sudo systemctl restart receipt-printer`

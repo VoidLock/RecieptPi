@@ -56,17 +56,19 @@ class ErrorNotifier:
         self.enabled = ntfy_url is not None
     
     def send_error(self, title, message):
-        """Send error notification to ntfy topic."""
+        """Send error notification to ntfy topic using native format."""
         if not self.enabled:
             return
         try:
-            payload = {
-                "title": title,
-                "message": message,
-                "priority": "high",
-                "tags": ["error"]
+            import socket
+            hostname = socket.gethostname()
+            # Use ntfy native format: POST with title and tags as headers
+            headers = {
+                "Title": f"Application Error on {hostname}",
+                "Tags": "rotating_light,error",
+                "Priority": "high"
             }
-            requests.post(self.ntfy_url, json=payload, timeout=5)
+            requests.post(self.ntfy_url, data=message, headers=headers, timeout=5)
         except Exception as e:
             logging.error("Failed to send error notification: %s", e)
 

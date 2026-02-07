@@ -248,16 +248,18 @@ class UpdateChecker(threading.Thread):
             self._send_error("Restart Failed", str(e))
     
     def _send_error(self, title, message):
-        """Send error notification to ntfy topic."""
+        """Send error notification to ntfy topic using native format."""
         if not self.error_notifier:
             return
         try:
-            payload = {
-                "title": title,
-                "message": message,
-                "priority": "high",
-                "tags": ["update", "error"]
+            import socket
+            hostname = socket.gethostname()
+            # Use ntfy native format: POST with title and tags as headers
+            headers = {
+                "Title": f"Application Error on {hostname}",
+                "Tags": "rotating_light,error",
+                "Priority": "high"
             }
-            requests.post(self.error_notifier, json=payload, timeout=5)
+            requests.post(self.error_notifier, data=message, headers=headers, timeout=5)
         except Exception as e:
             logging.error(f"Failed to send error notification: {e}")

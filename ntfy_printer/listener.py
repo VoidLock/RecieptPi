@@ -22,17 +22,19 @@ UPDATE_CHECKER = None
 
 
 def _send_error_notification(ntfy_url, title, message):
-    """Send error notification to ntfy topic."""
+    """Send error notification to ntfy topic using native format."""
     if not ntfy_url:
         return
     try:
-        payload = {
-            "title": title,
-            "message": message,
-            "priority": "high",
-            "tags": ["error"]
+        import socket
+        hostname = socket.gethostname()
+        # Use ntfy native format: POST with title and tags as headers
+        headers = {
+            "Title": f"Application Error on {hostname}",
+            "Tags": "rotating_light,error",
+            "Priority": "high"
         }
-        requests.post(ntfy_url, json=payload, timeout=5)
+        requests.post(ntfy_url, data=message, headers=headers, timeout=5)
     except Exception as e:
         logging.error("Failed to send error notification: %s", e)
 
