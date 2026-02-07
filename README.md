@@ -1,4 +1,7 @@
-# ReceiptPi
+<h1>
+  <img src="assets/logo.png" alt="ReceiptPi logo" width="96" style="vertical-align:middle; margin-right:12px;">
+  ReceiptPi
+</h1>
 
 This project is a Python service that subscribes to the [ntfy.sh](https://ntfy.sh) *or selfhosted ntfy server* topic and prints received messages to a connected USB thermal receipt printer.
 
