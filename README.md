@@ -41,7 +41,7 @@ The service was developed and tested on the following hardware:
 
 *   **Board:** Orange Pi Zero 2W (4GB RAM)
 *   **OS:** DietPi (minimal image)
-*   **Printer:** A standard USB ESC/POS thermal printer.
+*   **Printer:** Rongta RP850  [Amazon](https://a.co/d/0hIGPI9M)
 
 ## Prerequisites
 
