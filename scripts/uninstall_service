@@ -1,22 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Uninstalls the receipt-printer systemd service.
-# Usage: sudo ./scripts/uninstall_service
+# Uninstalls the receipt-printer systemd service and watchdog.
 
 SERVICE_NAME="receipt-printer.service"
-UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}"
-TARGET_DIR="/opt/ReceiptPi"
+HEALTHCHECK_SERVICE="receipt-printer-healthcheck.service"
+HEALTHCHECK_TIMER="receipt-printer-healthcheck.timer"
 
-echo "Stopping and disabling service..."
-sudo systemctl stop "$SERVICE_NAME" || true
-sudo systemctl disable "$SERVICE_NAME" || true
+echo "Stopping and disabling services..."
 
-echo "Removing systemd unit..."
-sudo rm -f "$UNIT_PATH"
+# Stop and disable health check timer first
+if systemctl list-unit-files "$HEALTHCHECK_TIMER" &>/dev/null; then
+  sudo systemctl disable --now "$HEALTHCHECK_TIMER" 2>/dev/null || true
+  sudo rm -f "/etc/systemd/system/$HEALTHCHECK_TIMER"
+fi
+
+if systemctl list-unit-files "$HEALTHCHECK_SERVICE" &>/dev/null; then
+  sudo systemctl stop "$HEALTHCHECK_SERVICE" 2>/dev/null || true
+  sudo rm -f "/etc/systemd/system/$HEALTHCHECK_SERVICE"
+fi
+
+# Stop and disable main service
+if systemctl list-unit-files "$SERVICE_NAME" &>/dev/null; then
+  sudo systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+  sudo rm -f "/etc/systemd/system/$SERVICE_NAME"
+fi
+
 sudo systemctl daemon-reload
 
-echo "Removing application directory: $TARGET_DIR"
-sudo rm -rf "$TARGET_DIR"
-
-echo "Uninstall complete."
+echo "Services uninstalled."
+echo "Note: /opt/ReceiptPi and /var/log/receipt-printer.log were not removed."

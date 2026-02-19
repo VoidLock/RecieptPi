@@ -11,8 +11,14 @@ USER_TO_RUN="${1:-${SUDO_USER:-$(whoami)}}"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || command -v python)}"
 
 SERVICE_NAME="receipt-printer.service"
+HEALTHCHECK_SERVICE="receipt-printer-healthcheck.service"
+HEALTHCHECK_TIMER="receipt-printer-healthcheck.timer"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}"
+HEALTHCHECK_SERVICE_PATH="/etc/systemd/system/${HEALTHCHECK_SERVICE}"
+HEALTHCHECK_TIMER_PATH="/etc/systemd/system/${HEALTHCHECK_TIMER}"
 TEMPLATE_PATH="${REPO_DIR}/deploy/receipt-printer.service.template"
+HEALTHCHECK_SERVICE_TEMPLATE="${REPO_DIR}/deploy/receipt-printer-healthcheck.service.template"
+HEALTHCHECK_TIMER_TEMPLATE="${REPO_DIR}/deploy/receipt-printer-healthcheck.timer.template"
 TARGET_DIR="/opt/ReceiptPi"
 
 if [ ! -f "$TEMPLATE_PATH" ]; then
@@ -44,7 +50,7 @@ echo "Setting up virtual environment..."
 sudo -u "$USER_TO_RUN" "$PYTHON_BIN" -m venv "$TARGET_DIR/venv"
 sudo -u "$USER_TO_RUN" "$TARGET_DIR/venv/bin/pip" install -r "$TARGET_DIR/requirements.txt"
 
-# Render unit file from template
+# Render main service unit file from template
 UNIT_CONTENT=$(sed \
   -e "s|%USER%|${USER_TO_RUN}|g" \
   -e "s|%WORKDIR%|${TARGET_DIR}|g" \
@@ -53,8 +59,27 @@ UNIT_CONTENT=$(sed \
 
 echo "Installing systemd unit to $UNIT_PATH"
 echo "$UNIT_CONTENT" | sudo tee "$UNIT_PATH" > /dev/null
+
+# Install health check service and timer
+if [ -f "$HEALTHCHECK_SERVICE_TEMPLATE" ] && [ -f "$HEALTHCHECK_TIMER_TEMPLATE" ]; then
+  echo "Installing health check watchdog..."
+  
+  HEALTHCHECK_SERVICE_CONTENT=$(sed \
+    -e "s|%WORKDIR%|${TARGET_DIR}|g" \
+    "$HEALTHCHECK_SERVICE_TEMPLATE")
+  echo "$HEALTHCHECK_SERVICE_CONTENT" | sudo tee "$HEALTHCHECK_SERVICE_PATH" > /dev/null
+  
+  sudo cp "$HEALTHCHECK_TIMER_TEMPLATE" "$HEALTHCHECK_TIMER_PATH"
+  
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now "$HEALTHCHECK_TIMER"
+  echo "Health check watchdog installed (runs every 5 minutes)"
+fi
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now "$SERVICE_NAME"
 
+echo ""
 echo "Service installed and started. Check status with:"
 echo "  sudo systemctl status $SERVICE_NAME"
+echo "  sudo systemctl status $HEALTHCHECK_TIMER"

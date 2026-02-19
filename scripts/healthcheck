@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Health check for receipt-printer service
+# Restarts the service if the log file hasn't been modified in STALE_THRESHOLD seconds
+# or if the process is not responding
+
+set -euo pipefail
+
+SERVICE_NAME="receipt-printer.service"
+LOG_FILE="/var/log/receipt-printer.log"
+STALE_THRESHOLD="${STALE_THRESHOLD:-600}"  # 10 minutes default
+
+# Check if service is running
+if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    echo "Service not running, systemd should handle restart"
+    exit 0
+fi
+
+# Check if log file exists and get last modification time
+if [ -f "$LOG_FILE" ]; then
+    LAST_MOD=$(stat -c %Y "$LOG_FILE" 2>/dev/null || echo 0)
+    NOW=$(date +%s)
+    AGE=$((NOW - LAST_MOD))
+    
+    if [ "$AGE" -gt "$STALE_THRESHOLD" ]; then
+        echo "Log file stale for ${AGE}s (threshold: ${STALE_THRESHOLD}s). Restarting service..."
+        systemctl restart "$SERVICE_NAME"
+        exit 0
+    fi
+fi
+
+# Check if process is responsive by verifying it has active network connections
+PID=$(systemctl show -p MainPID --value "$SERVICE_NAME")
+if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+    # Check if process has file descriptors open (indicates it's not completely hung)
+    if ! ls /proc/"$PID"/fd >/dev/null 2>&1; then
+        echo "Process $PID not accessible. Restarting service..."
+        systemctl restart "$SERVICE_NAME"
+        exit 0
+    fi
+fi
+
+echo "Health check passed"
+exit 0

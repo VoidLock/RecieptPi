@@ -8,9 +8,13 @@ User=%USER%
 WorkingDirectory=%WORKDIR%
 EnvironmentFile=%WORKDIR%/.env
 ExecStart=%PYTHON% %WORKDIR%/app.py --server
-Restart=on-failure
+Restart=always
 RestartSec=5
 LimitNOFILE=4096
+
+# Ensure clean restarts
+TimeoutStopSec=30
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=Receipt Printer Health Check
+After=receipt-printer.service
+
+[Service]
+Type=oneshot
+ExecStart=%WORKDIR%/scripts/healthcheck
